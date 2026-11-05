@@ -518,6 +518,18 @@ HTF_LOSS_DEFAULT = calcular_perda_tes_w(
 )
 
 
+class ArrayComDiag(np.ndarray):
+    def __new__(cls, input_array, diagnostico=None):
+        obj = np.asarray(input_array).view(cls)
+        obj.diagnostico = diagnostico
+        return obj
+
+    def __array_finalize__(self, obj):
+        if obj is None:
+            return
+        self.diagnostico = getattr(obj, "diagnostico", None)
+
+
 class RetornoReceptor(tuple):
     def __new__(cls, val_tuple, diag_dict):
         obj = super().__new__(cls, val_tuple)
@@ -563,11 +575,11 @@ def simular_receptor_csp(
 
     # Fator de escala se simular diferente de 91 loops
     fator_loops = float(n_loops_alvo) / 91.0
-    p_rec = res_campo["q_htf_out"] * fator_loops
+    p_rec = ArrayComDiag(res_campo["q_htf_out"] * fator_loops, res_campo)
 
     # Para que q_loss_1loop_mwt = p_rec_loss / n_loops em otimizacao_nsga_ii_v2.py
     # seja perfeitamente exato para qualquer n_loops:
-    p_rec_loss = (res_campo["q_rec_loss"] / 91.0) * float(n_loops)
+    p_rec_loss = (res_campo["q_rec_loss"] / 91.0) * float(n_loops_alvo)
 
     temp_amb = cenario_clima["temp"]
     t_in_celsius = np.where(p_rec > 0.0, T_HOT_OUT_DEFAULT, np.maximum(temp_amb + 10.0, T_FP_DEFAULT))
@@ -592,6 +604,7 @@ def despachar_csp_tes(
     q_rec_inc_mwt: Optional[np.ndarray] = None,
     q_rec_abs_mwt: Optional[np.ndarray] = None,
     q_fp_field_mwt: Optional[np.ndarray] = None,
+    scas_def_comp: Optional[np.ndarray] = None,
 ) -> dict:
     """
     Executa o despacho térmico acoplado (Campo HTF + TES 2 Tanques + Ciclo Rankine + Defocus a posteriori).
@@ -613,6 +626,21 @@ def despachar_csp_tes(
         except Exception:
             q_fp_field_mwt = np.zeros(n_total)
 
+    if scas_def_comp is None:
+        if hasattr(p_in, "diagnostico") and p_in.diagnostico and "scas_def" in p_in.diagnostico:
+            scas_def_comp = p_in.diagnostico["scas_def"]
+        else:
+            try:
+                c = np.load(os.path.join(WS_DIR, "cache_campo_91loops.npz"))
+                if "scas_def" in c:
+                    scas_def_comp = c["scas_def"]
+            except Exception:
+                scas_def_comp = np.ones(n_total)
+
+    if scas_def_comp is not None and len(scas_def_comp) != n_total:
+        n_rep = max(1, int(math.ceil(n_total / len(scas_def_comp))))
+        scas_def_comp = np.tile(scas_def_comp, n_rep)[:n_total]
+
     p_gross_nom_mwe = cycle_power * pc_eff
     # 91 loops para 50 MVA (fator_campo = 1.0)
     n_loops_atual = max(int(round(91.0 * fator_campo)), 1)
@@ -625,7 +653,7 @@ def despachar_csp_tes(
 
     q_pc_des = cycle_power
     q_pc_min = min_turb_frac * q_pc_des
-    q_pc_max = 1.05 * q_pc_des
+    q_pc_max = 1.00 * q_pc_des
     e_su_req = start * q_pc_des
     su_time = 0.5
     q_su_max = e_su_req / su_time
@@ -743,7 +771,7 @@ def despachar_csp_tes(
         w_track = SCA_DRIVES_ELEC_SAM * 1e-6 * 8.0 * n_loops_atual if q_f > 0 else 0.0
 
         m_sf = q_f_used * 1e3 / (cp_f * dt_loop) if q_f_used > 0 else 0.0
-        w_sf = k_sf_pump * (m_sf ** 3) if m_sf > 0 else 0.0
+        w_sf = (k_sf_pump / max(fator_campo ** 2, 1e-6)) * (m_sf ** 3) if m_sf > 0 else 0.0
 
         m_pb = q_pc * 1e3 / (cp_f * dt_loop)
         w_pump_pb = PB_PUMP_COEF_SAM * m_pb / 1e3
@@ -791,6 +819,9 @@ def despachar_csp_tes(
         "pot_anual_bruta_wh": pot_anual_bruta,
         "pot_anual_liquida_wh": pot_anual_liquida,
         "diagnostico_csp": {
+            "Field_fraction_of_focused_SCAs": np.clip(scas_def_comp * np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0), 0.0, 1.0) if scas_def_comp is not None else np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0),
+            "scas_def": np.clip(scas_def_comp * np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0), 0.0, 1.0) if scas_def_comp is not None else np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0),
+            "df_ctrl": np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0),
             "Q_Receptor_Antes_Inercia_MWt": p_in_mwt,
             "Q_Perda_Inercia_Campo_MWt": np.zeros(n_total),
             "Q_Dump_TES_Cheio_MWt": q_defoc_out,

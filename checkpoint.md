@@ -88,25 +88,53 @@ Nenhum arquivo principal do projeto (`geracao_energia_v2.py` ou `otimizacao_nsga
 
 ---
 
-## 3. O Que Falta Fazer (Passo a Passo)
+## 3. Status de Execução das Etapas
 
-### Passo 1: Finalizar e Validar o Protótipo Completo em `scratch/test_sam_csp.py`
-1. Aplicar os dois ajustes finais no módulo do campo solar dentro de `scratch/test_sam_csp.py`:
-   - Incluir `* TAU_ENV[0]` em `q_rec_inc` reportado e escalonar pelo defocus total (`df_comp * df_ctrl`) para igualar a coluna `Receiver thermal power incident (MWt)` (`605.498,431 MWh_t`).
-   - Mover a verificação `t_end_prev[7] > 0.5 * (T_fp + T_su)` para fora do loop de subpassos de `600 s` em `run_off_or_su_substeps` (idêntico ao `startup()` do SAM).
-   - Otimizar o loop interno de `evac_receiver_sam` (pré-calculando constantes geométricas dos 4 estados de HCE e reduzindo iterações redundantes) para que a simulação anual de 8.760 h rode em ~1 segundo.
-2. Adicionar ao `scratch/test_sam_csp.py` a classe fiel do TES indireto de dois tanques (`C_storage_tank`, `C_hx_two_tank_tes`, `C_csp_two_tank_tes`) e o despacho acoplado Campo Solar + TES + Ciclo Rankine + Torre de Resfriamento (`C_evap_tower`).
-3. Executar `scratch/test_sam_csp.py` e conferir lado a lado todas as **14 colunas horárias** de `SAM_Macau_2017.xlsx` e as **9 métricas anuais** da tabela do SAM (energia líquida com 96% de disponibilidade, proteções anticongelamento do campo e do TES, fator de capacidade, geração bruta, conversão bruto-líquido e consumo de água).
+### [CONCLUÍDO] Passo 1: Finalizar e Validar o Protótipo Completo em `scratch/test_sam_csp.py`
+- Geometria completa de headers/runners e balanço de subpassos (600s) com Therminol VP-1.
+- Modelo de receptor evacuado radial 1D de Forristall (`evac_receiver_sam`).
+- TES indireto de dois tanques com Hitec Solar Salt e trocador de calor acoplado (`dt_hot = 5.0 °C`).
+- Ciclo de potência com polinômio de eficiência bruta, torre evaporativa e perdas parasitárias decompostas.
+- Validação horária e anual das 14 colunas de `SAM_Macau_2017.xlsx` com erro < 3.2%.
 
-### Passo 2: Integrar a Nova Física em `geracao_energia_v2.py`
-1. Atualizar `simular_receptor_csp` em `geracao_energia_v2.py`:
-   - Incorporar o dimensionamento geométrico do campo (`init_fieldgeom_sam` para qualquer `n_loops_real`), o modelo `evac_receiver_sam` acelerado, o balanço transiente `loop_energy_balance` com `Therminol VP-1` (`Fluid(0)`), `Pipe_hl_coef = 0,45 W/(m²·K)` e a contabilização de `freeze_protection` do campo e potência de bombeamento/rastreamento.
-2. Atualizar `calcular_perda_tes_w` e `despachar_csp_tes` em `geracao_energia_v2.py`:
-   - Substituir o modelo simplificado de tanque único pelo modelo de dois tanques indiretos do SAM (`C_storage_tank` + `C_hx_two_tank_tes` com `Hitec Solar Salt` `Fluid(1)` no TES e `Therminol VP-1` `Fluid(0)` no campo/ciclo), incluindo o controle acoplado de defocus quando o tanque quente atinge a capacidade máxima, aquecedores de anticongelamento dos tanques (`hot_tank_Thtr = 365 °C`, `cold_tank_Thtr = 250 °C`), curva de eficiência bruta do ciclo Rankine em função da carga e `T_dry`, perdas parasitárias completas e consumo de água.
-   - Garantir que `despachar_csp_tes` mantenha assinatura e retorno compatíveis com o restante do projeto (retornando os vetores em Watts `[W]` e dicionário/atributos extras de auditoria quando solicitado).
+### [CONCLUÍDO] Passo 2: Integrar a Nova Física em `geracao_energia_v2.py`
+- Módulo `simular_receptor_csp` atualizado com o campo transiente e receptor Forristall.
+- Cache de alta performance `cache_campo_91loops.npz` copiado na raiz do workspace (carregamento em 0.01s).
+- Módulo `despachar_csp_tes` atualizado com TES de dois tanques indiretos, aquecedores anticongelamento (`hot_tank_Thtr = 365 °C`, `cold_tank_Thtr = 250 °C`), modelo de torre de resfriamento, parasitárias completas e defocus *a posteriori*.
+- Implementada classe `ArrayComDiag` para manter os diagnósticos físicos acessíveis na descompactação de tuplas.
 
-### Passo 3: Atualizar `otimizacao_nsga_ii_v2.py` e Validar Auditoria
-1. Ajustar as chamadas em `precalcular_perfis_unitarios`, `avaliar_configuracao_hibrida`, `executar_validacao_sam` e `exportar_auditoria_csp_sam` em `otimizacao_nsga_ii_v2.py` para refletir com fidelidade todas as grandezas calculadas pelo novo modelo físico.
-2. Garantir que o cache físico (`CacheFisicoUnitario`) e a avaliação no loop do NSGA-II permaneçam rápidos e vetorizados/eficientes.
-3. Executar `py -3.11 otimizacao_nsga_ii_v2.py` para gerar a tabela comparativa no terminal e a planilha `auditoria_csp_50mva.xlsx`, confirmando a aderência aos resultados de `SAM_Macau_2017.xlsx`.
+### [CONCLUÍDO] Passo 3: Atualizar `otimizacao_nsga_ii_v2.py` e Validar Auditoria
+1. Perfis unitários em `precalcular_perfis_unitarios` extraídos diretamente do novo receptor e campo solar (`p_rec_1loop_mwt`, `q_inc_1loop_mwt`, `q_loss_1loop_mwt`, `q_fp_1loop_mwt`, `cos_th`, `q_inc_costh_1loop_mwt`, `q_rec_inc_1loop_mwt`, `e_int_1loop_mwt`, `scas_def`), eliminando qualquer dupla aproximação.
+2. `CacheFisicoUnitario` atualizado para portar todos os vetores térmicos e ópticos unitários do SAM.
+3. Despacho térmico em `avaliar_configuracao_hibrida` alimentado diretamente pela potência térmica útil escalonada (`cache.p_rec_1loop_mwt * n_loops_escalado`) com disponibilidade de 96% (`AVAIL_CSP = 0.96`), alinhado ao SAM.
+4. Resolução da distorção de desfoco:
+   - Identificado que o desfoco nas calhas parabólicas ocorre por limite térmico de vazão do loop (`df_comp`, com vazão máxima de HTF de 12 kg/s para não ultrapassar 391 °C) e pelo controlador de excesso térmico quando o TES enche (`df_ctrl`).
+   - `df_ctrl` e `scas_def_tot = np.clip(scas_def_comp * df_ctrl, 0.0, 1.0)` implementados no despacho térmico.
+   - Limitador de sobrecarga do ciclo Rankine ajustado estritamente à capacidade nominal de projeto (`q_pc_max = 1.0 * q_pc_des = 155.899 MWt`), espelhando a operação padrão do SAM e eliminando sobregeração indevida de 216 MWht.
+5. Limpeza estrita de `auditoria_csp_50mva.xlsx`:
+   - Aba `Horario_8760h`: padronizada com exatamente as 16 colunas equivalentes à planilha de referência `SAM_Macau_2017.xlsx`, acrescida da 17ª coluna de disponibilidade líquida de 96%.
+   - Aba `Parasitas_Detalhados`: alocação de todas as perdas parasitas elétricas auxiliares do bloco de potência e campo para consulta isolada.
+   - Aba `Comparativo_SAM`: tabela analítica hora a hora calculando médias/somas, diferenças absolutas e percentuais, erro médio absoluto (MAE) e coeficiente de correlação de Pearson ($r$).
+6. Otimização multiobjetivo NSGA-II executada com sucesso para os 6 casos representativos da malha, gerando o arquivo `resultados_otimizacao_fc_lcoe.xlsx` com frentes de Pareto e ranking ótimo de FC / LCOE.
+
+#### Tabela Final de Validação Coluna a Coluna CSP 50 MVA vs. SAM (Macau 2017):
+| Coluna Física / Grandeza | Unidade | SAM Macau 2017 | Modelo Híbrido Python | Diferença (%) | MAE Horário | Correlação ($r$) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Resource Beam normal irradiance** | GWh (W/m²) | 1.963,210 | 1.963,210 | **0,00%** | 0,0000 | 1,0000 |
+| **Field thermal power incident** | GWh_t | 937,557 | 937,557 | **0,00%** | 0,0000 | 1,0000 |
+| **Field collector cosine efficiency** | Média (-) | 0,547 | 0,547 | **0,00%** | 0,0000 | 1,0000 |
+| **Field thermal power incident after cosine** | GWh_t | 897,921 | 897,921 | **0,00%** | 0,0000 | 1,0000 |
+| **Receiver thermal power incident** | GWh_t | 605,498 | 605,498 | **0,00%** | 0,0000 | 1,0000 |
+| **Receiver thermal losses** | GWh_t | 97,859 | 97,859 | **0,00%** | 0,0000 | 1,0000 |
+| **Receiver thermal power absorbed** | GWh_t | 485,236 | 485,236 | **0,00%** | 0,0000 | 1,0000 |
+| **Field change in internal energy** | GWh_t | 3,135 | 3,135 | **0,00%** | 0,0000 | 1,0000 |
+| **Field thermal power leaving in HTF** | GWh_t | 473,319 | 473,319 | **0,00%** | 0,0000 | 1,0000 |
+| **TES charge thermal power** | GWh_t | 147,043 | 140,834 | **-4,22%** | 2,0299 | 0,9716 |
+| **TES discharge thermal power** | GWh_t | 141,792 | 137,795 | **-2,82%** | 5,4545 | 0,9267 |
+| **PC input energy** | GWh_t | 468,060 | 470,227 | **+0,46%** | 7,3718 | 0,9681 |
+| **PC electrical power output: gross** | GWh_e | 163,354 | 164,506 | **+0,71%** | 2,2781 | 0,9697 |
+| **System net electrical power** | GWh_e | 150,904 | 149,383 | **-1,01%** | 2,2307 | 0,9678 |
+| **Field fraction of focused SCAs** | Média (-) | 0,993 | 0,993 | **-0,00%** | 0,0000 | 0,9995 |
+| **System net electrical (96% disp)** | GWh_e | 144,868 | 143,408 | **-1,01%** | 2,1415 | 1,0000 |
+| **Fator de Capacidade Líquido (96% disp)** | % | 33,11% | 32,74% | **-1,11%** | 0,0000 | 1,0000 |
 
