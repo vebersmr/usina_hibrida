@@ -38,10 +38,11 @@ from simulacao_eolica_isolada import (
 
 
 # ==============================================================================
-# 1. MÓDULO CSP (CALHA PARABÓLICA + TES)
+# 1. MÓDULO CSP (CALHA PARABÓLICA + TES) — FÍSICA SAM (C++)
 # ==============================================================================
 
-# Constantes Físicas e de Engenharia CSP
+WS_DIR = os.path.dirname(os.path.abspath(__file__))
+
 LATITUDE_CSP = -13.27
 LONGITUDE_CSP = -43.42
 ZONE_CSP = -3
@@ -54,16 +55,19 @@ THETA_STOW = math.radians(170)
 
 C1 = 2.331e-20                     # [mmHg*cm³/K]
 CSI = 2.4e-8                       # [cm]
-SIGMA = 5.67e-8                    # Constante de Stefan-Boltzmann
+SIGMA = 5.67e-8                    # Constante de Stefan-Boltzmann [W/(m²·K⁴)]
 GRAV = 9.81                        # Gravidade [m/s²]
 
-Hitec = modelagem_csp.Fluid(1)
-air = modelagem_csp.Fluid(2)
+Hitec = modelagem_csp.Fluid(1)     # Sal fundido Hitec (Fluid(1)) para o TES
+air = modelagem_csp.Fluid(2)       # Ar ambiente
 field = modelagem_csp.SolarField()
-n_loops = field.actual_nLoops()
+n_loops = field.actual_nLoops()    # Número de loops do campo base (181)
 
-T_COLD_IN_DEFAULT = field.system.loop_inlet_htf_temperature   # 293 °C
-T_HOT_OUT_DEFAULT = field.system.loop_outlet_htf_temperature  # 391 °C
+T_COLD_IN_DEFAULT = 293.0          # Temperatura de projeto na entrada do loop [°C]
+T_HOT_OUT_DEFAULT = 391.0          # Temperatura de projeto na saída do loop [°C]
+T_STARTUP_DEFAULT = 325.34         # Temperatura mínima de saída para despacho [°C]
+T_SHUTDOWN_DEFAULT = 325.34        # Temperatura de corte noturno [°C]
+T_FP_DEFAULT = 150.0               # Temperatura de proteção anticongelamento [°C]
 T_HTF_IN = T_COLD_IN_DEFAULT + 273.15
 T_HTF_MED_K = (T_COLD_IN_DEFAULT + T_HOT_OUT_DEFAULT) * 0.5 + 273.15
 
@@ -72,116 +76,80 @@ L_FOCAL = field.col.average_surface_to_focus_path_length
 L_SCA = field.col.length_collector_assembly
 D_SCA = field.col.piping_distance_between_assemblies
 
-DIRT_HCE = field.rec.Dirt_HCE
-ALPHA_ABS = field.rec.alpha_abs
-TAU_ENV = field.rec.tau_env
-SHADOW = field.rec.Shadowing
-P_A = field.rec.P_a[0]
-D2 = field.rec.absorber_tube_inner_diameter
-D3 = field.rec.absorber_tube_outer_diameter
-D4 = field.rec.glass_envelope_inner_diameter
-D5 = field.rec.glass_envelope_outer_diameter
+DIRT_HCE = [0.98]
+ALPHA_ABS = [0.963]
+TAU_ENV = [0.964]
+SHADOW = [0.935]
+P_A = 0.0001                       # Pressão no anel de vácuo do HCE [torr]
+D2 = 0.076                         # Diâmetro interno do tubo absorvedor metálico [m]
+D3 = 0.080                         # Diâmetro externo do tubo absorvedor metálico [m]
+D4 = 0.115                         # Diâmetro interno do envelope de vidro [m]
+D5 = 0.120                         # Diâmetro externo do envelope de vidro [m]
+EPS_4 = 0.86                       # Emissividade interna do vidro
+EPS_5 = 0.86                       # Emissividade externa do vidro
+ALPHA_ENV_0 = 0.02                 # Absortância do envelope de vidro
 
 EPS_MATRIX = np.array(field.rec.epsilon_3_11)
-EPS_4 = field.rec.epsilon_env[0]
-INTERP_EPS_3 = interp1d(EPS_MATRIX[:, 0], EPS_MATRIX[:, 1], kind='linear')
+INTERP_EPS_3 = interp1d(EPS_MATRIX[:, 0], EPS_MATRIX[:, 1], kind='linear', fill_value='extrapolate')
 
 CYCLE_THERMAL_POWER = field.system.cycle_thermal_power()
+Q_PC_DES = CYCLE_THERMAL_POWER
 TES_CAP_DEFAULT = CYCLE_THERMAL_POWER * field.system.hours_of_storage_at_design_point
 PC_EFF_DEFAULT = field.system.cycle_thermal_efficiency
-P_GROSS_DEFAULT = CYCLE_THERMAL_POWER * PC_EFF_DEFAULT        # 111.0 MWe para 100 MWe líquidos
+P_GROSS_DEFAULT = CYCLE_THERMAL_POWER * PC_EFF_DEFAULT
+DEGRADATION_CSP_DEFAULT = 0.2
 
-DEGRADATION_CSP_DEFAULT = 0.2                                 # [%/ano]
-PIPE_HL_COEF_SAM = 10.0                                       # Coef. perda térmica tubulação SAM [W/m²]
-DT_DESIGN_SAM = (T_COLD_IN_DEFAULT + T_HOT_OUT_DEFAULT) * 0.5 - 25.0  # Delta T de projeto [°C]
+PIPE_HL_COEF_SAM = 0.45            # Coeficiente global de perda térmica tubulação SAM [W/(m²·K)]
+MC_BAL_HOT_PER_MW = 0.20           # Capacidade térmica tubulação quente [kWht/(K·MWt)]
+MC_BAL_COLD_PER_MW = 0.20          # Capacidade térmica tubulação fria [kWht/(K·MWt)]
+MC_BAL_SCA_WHT_KM = 4.5            # Inércia térmica suportes por SCA [Wht/(K·m)]
+M_DOT_HTFMIN = 1.0                 # Vazão mássica mínima por loop [kg/s]
+M_DOT_HTFMAX = 12.0                # Vazão mássica máxima por loop [kg/s]
 
-# Parâmetros físicos unitários de perdas parasitas do SAM (cmod_trough_physical / tcs)
-PB_FIXED_PAR_SAM = 0.0055          # Carga fixa constante por MW do bloco [MWe/MWcap]
-BOP_PAR_SAM = 0.02467              # Fração nominal de BOP por MW do bloco [MWe/MWcap]
-BOP_PAR_0_SAM = 0.0                # Coef. constante do polinômio de BOP
-BOP_PAR_1_SAM = 0.483              # Coef. linear do polinômio de BOP
-BOP_PAR_2_SAM = 0.517              # Coef. quadrático do polinômio de BOP
+PB_FIXED_PAR_SAM = 0.0055          # Carga fixa parasitária constante [MWe/MWcap]
+BOP_PAR_SAM = 0.02273              # Coeficiente nominal de auxiliares/BOP [MWe/MWcap]
+BOP_PAR_0_SAM = 0.0                # Coeficiente constante do polinômio de BOP
+BOP_PAR_1_SAM = 0.483              # Coeficiente linear do polinômio de BOP
+BOP_PAR_2_SAM = 0.517              # Coeficiente quadrático do polinômio de BOP
 PB_PUMP_COEF_SAM = 0.55            # Bombeamento HTF do ciclo [kWe/(kg/s)]
-TES_PUMP_COEF_SAM = 0.55           # Bombeamento HTF do TES [kWe/(kg/s)]
+TES_PUMP_COEF_SAM = 0.15           # Bombeamento HTF do TES [kWe/(kg/s)]
 SCA_DRIVES_ELEC_SAM = 125.0        # Potência de rastreamento por coletor [W/SCA]
-COOLING_PAR_DES_SAM = 0.0175       # Fração nominal do condensador por MW do bloco [MWe/MWcap]
-
-# Propriedades termohidráulicas por loop individual (independentes da escala da usina)
-CP_HTF_MED_J_KGK = Hitec.Cp_ave(T_COLD_IN_DEFAULT + 273.15, T_HOT_OUT_DEFAULT + 273.15) * 1000.0
-DT_HTF_LOOP_K = T_HOT_OUT_DEFAULT - T_COLD_IN_DEFAULT        # 98.0 K
-M_DOT_LOOP_DES_KGS = 8.15          # Vazão mássica nominal em 1 loop no ponto de projeto [kg/s]
-W_PUMP_LOOP_DES_W = 24200.0        # Potência de bombeamento nominal de 1 loop (HCE + runners) [We/loop]
+COOLING_PAR_DES_SAM = 0.0175       # Fração nominal de resfriamento da torre [MWe/MWcap]
+DT_HX_SAM = 5.0                    # Delta T de aproximação no trocador do TES [°C]
+HOT_TANK_THTR_C = 365.0            # Setpoint do aquecedor anticongelamento tanque quente [°C]
+COLD_TANK_THTR_C = 250.0           # Setpoint do aquecedor anticongelamento tanque frio [°C]
 
 
-def calcular_perda_tes_w(
-    TES_hours: float,
-    P_gross: float = P_GROSS_DEFAULT,
-    eta: float = PC_EFF_DEFAULT,
-    T_cold_in: float = T_COLD_IN_DEFAULT,
-    T_hot_out: float = T_HOT_OUT_DEFAULT,
-    dT_approach: float = 5.0,
-    h_min: float = 1.0,
-    h_tank_in: float = 12.0,
-    tank_pairs: int = 1,
-    u_tank: float = 0.4,
-) -> float:
-    """
-    Calcula a perda térmica dos tanques de armazenamento térmico (TES) em Watts [Wt]
-    seguindo exatamente a modelagem física do SAM com o fluido Hitec (Fluid(1)).
-    """
-    if TES_hours <= 0.0 or P_gross <= 0.0:
-        return 0.0
-
-    cycle_power = P_gross / eta
-    Q_tes_des = cycle_power * TES_hours  # C na fórmula [MWht]
-
-    T_tes_hot = T_hot_out - dT_approach + 273.15
-    T_tes_cold = T_cold_in + dT_approach + 273.15
-
-    T_tes_ave = 0.5 * (T_tes_hot + T_tes_cold) - 273.15
-
-    rho_ave = Hitec.dens(T_tes_ave, 1)
-    cp_ave = Hitec.Cp_ave(T_tes_cold, T_tes_hot)
-
-    vol_one_temp_avail = Q_tes_des * 3600.0 / (
-        rho_ave * cp_ave / 1000.0 * (T_tes_hot - T_tes_cold)
-    )
-    vol_one_temp_total = vol_one_temp_avail / (1.0 - h_min / h_tank_in)
-
-    A_cs = vol_one_temp_total / (h_tank_in * tank_pairs)
-    d_tank_out = pow(A_cs / pi, 0.5) * 2.0
-
-    UA_tanks_one_temp = u_tank * (A_cs + pi * d_tank_out * h_tank_in) * tank_pairs
-
-    T_amb_des = 15.0 + 273.15
-    q_dot_loss_cold = UA_tanks_one_temp * (T_tes_cold - T_amb_des) * 1.0e-6
-    q_dot_loss_hot = UA_tanks_one_temp * (T_tes_hot - T_amb_des) * 1.0e-6
-    q_dot_loss_des = q_dot_loss_cold + q_dot_loss_hot  # [MWt]
-
-    return q_dot_loss_des * 1.0e6  # Converte de [MWt] para [Wt]
-
-
-HTF_LOSS_DEFAULT = calcular_perda_tes_w(
-    TES_hours=field.system.hours_of_storage_at_design_point,
-    P_gross=P_GROSS_DEFAULT,
-    eta=PC_EFF_DEFAULT,
-)
+def ler_metadados_nsrdb(path_pasta: str, prefixo_arquivo: str = "") -> dict:
+    """Lê metadados das duas primeiras linhas do arquivo climático NSRDB."""
+    arquivos = [f for f in os.listdir(path_pasta) if f.endswith(".csv") and (prefixo_arquivo in f)]
+    if not arquivos:
+        raise FileNotFoundError(f"Nenhum CSV com prefixo '{prefixo_arquivo}' em '{path_pasta}'.")
+    caminho_csv = os.path.join(path_pasta, sorted(arquivos)[0])
+    df_meta = pd.read_csv(caminho_csv, nrows=1)
+    lat = float(df_meta["Latitude"].iloc[0])
+    lon = float(df_meta["Longitude"].iloc[0])
+    tz = int(float(df_meta["Time Zone"].iloc[0]))
+    alt = float(df_meta["Elevation"].iloc[0])
+    return {
+        "location_id": str(df_meta["Location ID"].iloc[0]),
+        "latitude": lat,
+        "longitude": lon,
+        "tz": tz,
+        "altitude": alt,
+        "bs_pv": abs(lat),
+    }
 
 
 def _calc_efficiency_csp(theta, azi, elev, omega_col, ftrack, iam):
     if elev <= 0 or ftrack <= 0:
         return np.zeros(field.nSCA)
-
     n_sca = field.nSCA
     end_gain = np.zeros(n_sca)
-
     row_shadow = abs(math.cos(omega_col)) * field.row_spacing / field.col.aperture_width
     row_shadow = max(0.0, min(row_shadow, 1.0))
-
-    # 'azi' está em radianos (0 = Sul, +/-pi = Norte na convenção Duffie & Beckman)
     sol_no_norte = abs(azi) >= (math.pi / 2.0)
     ganho_unitario = max(L_FOCAL * math.tan(theta) - D_SCA, 0.0) / L_SCA
-
     for a in range(n_sca):
         if sol_no_norte:
             if a != 0 and a != (n_sca - 1):
@@ -189,42 +157,9 @@ def _calc_efficiency_csp(theta, azi, elev, omega_col, ftrack, iam):
         else:
             if a != (math.floor(n_sca / 2) - 1) and a != math.floor(n_sca / 2):
                 end_gain[a] = ganho_unitario
-
     end_loss = np.clip(1.0 - L_FOCAL * math.tan(theta) / L_SCA + end_gain, 0.0, 1.0)
     col_opt_eta = field.col.Col_opt_eff * row_shadow * end_loss * ftrack * iam * math.cos(theta)
     return col_opt_eta * DIRT_HCE[0] * SHADOW[0] * TAU_ENV[0] * ALPHA_ABS[0]
-
-
-def ler_metadados_nsrdb(path_pasta: str, prefixo_arquivo: str = "") -> dict:
-    """
-    Lê as duas primeiras linhas do arquivo climático NSRDB para extrair
-    Latitude, Longitude, Time Zone, Elevation e definir a inclinação PV (|Latitude|).
-    """
-    arquivos = [
-        f for f in os.listdir(path_pasta)
-        if f.endswith(".csv") and (prefixo_arquivo in f)
-    ]
-    if not arquivos:
-        raise FileNotFoundError(
-            f"Nenhum arquivo CSV com prefixo '{prefixo_arquivo}' encontrado em '{path_pasta}'."
-        )
-
-    caminho_csv = os.path.join(path_pasta, sorted(arquivos)[0])
-    df_meta = pd.read_csv(caminho_csv, nrows=1)
-
-    lat = float(df_meta["Latitude"].iloc[0])
-    lon = float(df_meta["Longitude"].iloc[0])
-    tz = int(float(df_meta["Time Zone"].iloc[0]))
-    alt = float(df_meta["Elevation"].iloc[0])
-
-    return {
-        "location_id": str(df_meta["Location ID"].iloc[0]),
-        "latitude": lat,
-        "longitude": lon,
-        "tz": tz,
-        "altitude": alt,
-        "bs_pv": abs(lat),  # Inclinação dos módulos igual ao módulo da latitude
-    }
 
 
 def calc_angles_eff_csp(
@@ -247,8 +182,6 @@ def calc_angles_eff_csp(
     eff = np.empty((8760, 8))
     dt = 1.0
     iam_matrix = [1, 0.0327, -0.1351]
-
-    # Convenção ISO/NSRDB (Oeste negativo): shift = longitude - 15 * tz
     shift = psi - 15.0 * zone
 
     for i in range(8760):
@@ -278,7 +211,6 @@ def calc_angles_eff_csp(
         stw_time = noon + stw_hr3
 
         hr_a, hr_b = hour - dt, hour
-
         if hr_b > dep_time and hr_a < stw_time:
             if hr_a < dep_time:
                 ftrack = (hr_b - dep_time) / dt
@@ -335,151 +267,312 @@ def calc_angles_eff_csp(
     return eff
 
 
-def fq_34conv(t_3, t_4):
-    t_34 = (t_3 + t_4) / 2
-    lam = C1 * t_34 / (P_A * CSI**2)
-    cp_34 = field.annulus_gas.Cp(t_34 - 273.15) * 1e3
-    cv_34 = field.annulus_gas.Cv(t_34) * 1e3
-    gamma_gas = cp_34 / cv_34
-    b_val = (9 * gamma_gas - 5) / (2 * gamma_gas + 2)
-    k_34 = field.annulus_gas.cond(t_34 - 273.15)
-    h_conv = k_34 / (D3 / 2 * math.log(D4 / D3) + b_val * lam / 100 * (D3 / D4 + 1))
-    return math.pi * D3 * h_conv * (t_3 - t_4)
+# Propriedades termofísicas analíticas do Therminol VP-1 e Hitec Salt
+def vp1_cp_k(t_k: float) -> float:
+    t_c = t_k - 273.15
+    return 1.509 + 0.002496 * t_c + 0.0000007888 * (t_c ** 2)
+
+def vp1_cp_ave_k(t_cold_k: float, t_hot_k: float) -> float:
+    dt = (t_hot_k - t_cold_k) / 5.0
+    t_i = t_cold_k + 0.5 * dt
+    s = 0.0
+    for _ in range(5):
+        t_c = t_i - 273.15
+        s += 1.509 + 0.002496 * t_c + 0.0000007888 * (t_c ** 2)
+        t_i += dt
+    return s * 0.2
+
+def salt_cp_k(t_k: float) -> float:
+    return (1443.0 + 0.172 * (t_k - 273.15)) / 1000.0
+
+def salt_dens_k(t_k: float) -> float:
+    return max(2090.0 - 0.636 * (t_k - 273.15), 1000.0)
+
+def salt_cp_ave_k(t1: float, t2: float) -> float:
+    return salt_cp_k(0.5 * (t1 + t2))
 
 
-def fq_34rad(t_3, t_4):
-    eps_3 = INTERP_EPS_3(t_3 - 273.15)
-    h_rad = SIGMA * (t_3**2 + t_4**2) * (t_3 + t_4) / (1 / eps_3 + D3 / D4 * (1 / EPS_4 - 1))
-    return math.pi * D3 * h_rad * (t_3 - t_4)
+class Tank:
+    """Traduz fielmente C_storage_tank de csp_solver_two_tank_tes.cpp."""
+    def __init__(self, v_tank: float, t_htr_k: float, q_htr_max_mw: float, v_ini: float, t_ini_k: float, t_des_k: float):
+        self.h_tank = 12.0
+        self.h_min = 1.0
+        self.u_tank = 0.40
+        rho_des = salt_dens_k(t_des_k)
+        self.v_inactive = v_tank * self.h_min / self.h_tank
+        self.mass_inactive = self.v_inactive * rho_des
+        a_cs = v_tank / self.h_tank
+        d = 2.0 * math.sqrt(a_cs / math.pi)
+        self.ua = self.u_tank * (a_cs + math.pi * d * self.h_tank)
+        self.t_htr = t_htr_k
+        self.q_htr_max = q_htr_max_mw
+        self.t_prev = t_ini_k
+        self.m_prev = v_ini * salt_dens_k(t_ini_k)
+        self.t_calc, self.m_calc = self.t_prev, self.m_prev
+
+    def mass_avail(self) -> float:
+        return max(self.m_prev - self.mass_inactive, 0.0)
+
+    def energy_balance(self, dt: float, m_in: float, m_out: float, t_in: float, t_amb: float) -> Tuple[float, float, float]:
+        cp = salt_cp_k(self.t_prev) * 1000.0
+        self.m_calc = self.m_prev + dt * (m_in - m_out)
+        empty = False
+        if self.m_calc < 0.001:
+            self.m_calc = 0.001
+            empty = True
+            m_out = m_in - (0.001 - self.m_prev) / dt
+        if self.m_prev <= 1e-4 and empty:
+            self.t_calc = t_in if m_in > 0 else self.t_prev
+            self.m_calc = 0.0
+            return self.t_calc, 0.0, 0.0
+        diff = m_in - m_out
+        diff = max(diff, 1e-5) if diff >= 0.0 else min(diff, -1e-5)
+        a = m_in * t_in + self.ua / cp * t_amb
+        b = m_in + self.ua / cp
+        c = diff
+        base = max(dt * c / self.m_prev + 1.0, 0.0)
+
+        def solve(a_):
+            tc = a_ / b + (self.t_prev - a_ / b) * (base ** (-b / c))
+            ta = a_ / b + self.m_prev * (self.t_prev - a_ / b) / ((c - b) * dt) * (base ** (1.0 - b / c) - 1.0)
+            return tc, ta
+
+        self.t_calc, t_ave = solve(a)
+        q_htr = 0.0
+        if self.t_calc < self.t_htr:
+            pw = base ** (-b / c)
+            q_htr = (b * ((self.t_htr - self.t_prev * pw) / (1.0 - pw)) - a) * cp / 1e6
+            q_htr = min(q_htr, self.q_htr_max)
+            self.t_calc, t_ave = solve(a + q_htr * 1e6 / cp)
+        q_loss = self.ua * (t_ave - t_amb) / 1e6
+        if empty:
+            self.m_calc = 0.0
+        return t_ave, q_htr, q_loss
+
+    def converged(self):
+        self.t_prev, self.m_prev = self.t_calc, self.m_calc
 
 
-def fq_cond_bracket(t_3, t_6, p_6, v_6):
-    p_brac, d_brac, a_cs_brac, k_brac_steel = 0.2032, 0.0508, 0.00016129, 48.0
-    t_base = t_3 - 10.0
-    t_brac = (t_base + t_6) / 2
-    t_brac6 = (t_brac + t_6) / 2.0
+class HX:
+    """Trocador de calor em contracorrente indireto VP-1 / Sal Solar (C_hx_two_tank_tes)."""
+    def __init__(self, q_pc_des_w: float):
+        t_hot_k = T_HOT_OUT_DEFAULT + 273.15
+        t_cold_k = T_COLD_IN_DEFAULT + 273.15
+        c_h = vp1_cp_ave_k(t_cold_k, t_hot_k) * 1000.0
+        c_c = salt_cp_ave_k(t_cold_k, t_hot_k) * 1000.0
+        dT = t_hot_k - t_cold_k
+        m_h, m_c = q_pc_des_w / (c_h * dT), q_pc_des_w / (c_c * dT)
+        self.m_des_ave = 0.5 * (m_h + m_c)
+        c_min = q_pc_des_w / dT
+        q_max = c_min * (t_hot_k - (t_cold_k - DT_HX_SAM))
+        eff = q_pc_des_w / q_max
+        self.ua_des = eff / (1.0 - eff) * c_min
 
-    if v_6 <= 0.1:
-        mu_brac6 = air.visc(t_brac6)
-        rho_brac6 = air.dens(t_brac6, p_6)
-        cp_brac6 = air.Cp(t_brac6) * 1000
-        k_brac6 = air.cond(t_brac6)
-        nu_brac6 = mu_brac6 / rho_brac6
-        alpha_brac6 = k_brac6 / (cp_brac6 * rho_brac6)
-        beta_brac6 = 1 / t_brac6
-        ra_dbrac = GRAV * beta_brac6 * abs(t_brac - t_6) * d_brac**3 / (alpha_brac6 * nu_brac6)
-        pr_brac6 = nu_brac6 / alpha_brac6
-        nu_bar = pow(
-            0.60 + (0.387 * pow(ra_dbrac, 0.1667)) / pow(1 + pow(0.559 / pr_brac6, 0.5625), 0.2963),
-            2,
-        )
-        h_brac6 = nu_bar * k_brac6 / d_brac
-    else:
-        mu_brac = air.visc(t_brac)
-        mu_6 = air.visc(t_6)
-        rho_6 = air.dens(t_6, p_6)
-        rho_brac = air.dens(t_brac, p_6)
-        k_brac = air.cond(t_brac)
-        k_6 = air.cond(t_6)
-        k_brac6 = air.cond(t_brac6)
-        cp_brac = air.Cp(t_brac) * 1000
-        cp_6 = air.Cp(t_6) * 1000
-        nu_6 = mu_6 / rho_6
-        nu_brac = mu_brac / rho_brac
-        alpha_brac = k_brac / (cp_brac * rho_brac)
-        alpha_6 = k_6 / (cp_6 * rho_6)
-        re_dbrac = v_6 * d_brac / nu_6
-        pr_brac = nu_brac / alpha_brac
-        pr_6 = nu_6 / alpha_6
+    def solve(self, t_f_in: float, m_f: float, t_s_in: float, m_s: float) -> Tuple[float, float, float]:
+        if m_f <= 0.0 or m_s <= 0.0:
+            return t_f_in, t_s_in, 0.0
+        ua = self.ua_des * (0.5 * (m_f + m_s) / self.m_des_ave) ** 0.8
+        cf = vp1_cp_ave_k(min(t_s_in, t_f_in), max(t_s_in, t_f_in)) * 1000.0 * m_f
+        cs = salt_cp_ave_k(t_s_in, t_f_in) * 1000.0 * m_s
+        cmin, cmax = min(cf, cs), max(cf, cs)
+        cr, ntu = cmin / cmax, ua / cmin
+        eff = ntu / (1 + ntu) if cr > 0.999 else (1 - math.exp(-ntu * (1 - cr))) / (1 - cr * math.exp(-ntu * (1 - cr)))
+        q = eff * cmin * abs(t_f_in - t_s_in)
+        if t_s_in > t_f_in:
+            return t_f_in + q / cf, t_s_in - q / cs, q * 1e-6
+        return t_f_in - q / cf, t_s_in + q / cs, q * 1e-6
 
-        n_val = 0.37 if pr_6 <= 10 else 0.36
-        if re_dbrac < 40:
-            c_val, m_val = 0.75, 0.4
-        elif 40 <= re_dbrac < 1e3:
-            c_val, m_val = 0.51, 0.5
-        elif 1e3 <= re_dbrac < 2e5:
-            c_val, m_val = 0.26, 0.6
+
+class TES:
+    """Coordenador do sistema de armazenamento térmico de dois tanques indiretos (C_csp_two_tank_tes)."""
+    def __init__(self, q_tes_des_mwht: float, q_pc_des_mwt: float):
+        t_hot_k = T_HOT_OUT_DEFAULT + 273.15
+        t_cold_k = T_COLD_IN_DEFAULT + 273.15
+        self.t_hot_des = t_hot_k - DT_HX_SAM
+        self.t_cold_des = t_cold_k + DT_HX_SAM
+        cp_ave = salt_cp_ave_k(self.t_cold_des, self.t_hot_des)
+        rho_avg = salt_dens_k(0.5 * (self.t_hot_des + self.t_cold_des))
+        dT = self.t_hot_des - self.t_cold_des
+
+        v_active = q_tes_des_mwht * 3600.0 * 1e6 / (rho_avg * cp_ave * 1000.0 * dT)
+        self.v_tank = v_active / (1.0 - 1.0 / 12.0)
+        m_active = q_tes_des_mwht * 3600.0 / (cp_ave / 1000.0 * dT)
+        v_inact = self.v_tank - v_active
+        m_hot = v_inact * salt_dens_k(self.t_hot_des)
+        m_cold = m_active + v_inact * salt_dens_k(self.t_cold_des)
+
+        self.hot = Tank(self.v_tank, HOT_TANK_THTR_C + 273.15, 25.0, m_hot / salt_dens_k(t_hot_k), t_hot_k, self.t_hot_des)
+        self.cold = Tank(self.v_tank, COLD_TANK_THTR_C + 273.15, 25.0, m_cold / salt_dens_k(t_cold_k), t_cold_k, self.t_cold_des)
+        self.hx = HX(q_pc_des_mwt * 1e6)
+        self.ratio = vp1_cp_ave_k(t_cold_k, t_hot_k) / salt_cp_ave_k(self.t_hot_des, self.t_cold_des)
+
+    def dc_avail(self, t_cold_ext: float, dt: float = 3600.0) -> float:
+        m_tank = self.hot.mass_avail() / dt
+        _, _, q = self.hx.solve(t_cold_ext, m_tank / self.ratio, self.hot.t_prev, m_tank)
+        return q
+
+    def ch_avail(self, t_hot_ext: float, dt: float = 3600.0) -> float:
+        m_tank = self.cold.mass_avail() / dt
+        _, _, q = self.hx.solve(t_hot_ext, m_tank / self.ratio, self.cold.t_prev, m_tank)
+        return q
+
+    def step(self, mode: int, q_target: float, t_ext_in: float, t_amb: float, dt: float = 3600.0) -> dict:
+        out = dict(q_ch=0.0, q_dc=0.0, m_ext=0.0, m_tank=0.0, q_htr=0.0, q_loss=0.0, t_ext_out=t_ext_in)
+        if mode == 0 or q_target <= 1e-6:
+            _, qh1, ql1 = self.hot.energy_balance(dt, 0.0, 0.0, 0.0, t_amb)
+            _, qh2, ql2 = self.cold.energy_balance(dt, 0.0, 0.0, 0.0, t_amb)
+            out.update(q_htr=qh1 + qh2, q_loss=ql1 + ql2)
         else:
-            c_val, m_val = 0.076, 0.7
+            src, snk = (self.cold, self.hot) if mode > 0 else (self.hot, self.cold)
+            q_av = self.ch_avail(t_ext_in, dt) if mode > 0 else self.dc_avail(t_ext_in, dt)
+            q_target = min(q_target, q_av)
+            m_tank_max = src.mass_avail() / dt
+            m_tank = m_tank_max * q_target / max(q_av, 1e-9)
+            t_src, qh1, ql1 = src.energy_balance(dt, 0.0, m_tank, 0.0, t_amb)
+            t_ext_out, t_s_out, q = self.hx.solve(t_ext_in, m_tank / self.ratio, t_src, m_tank)
+            _, qh2, ql2 = snk.energy_balance(dt, m_tank, 0.0, t_s_out, t_amb)
+            out.update(m_ext=m_tank / self.ratio, m_tank=m_tank, q_htr=qh1 + qh2, q_loss=ql1 + ql2, t_ext_out=t_ext_out)
+            out["q_ch" if mode > 0 else "q_dc"] = q
+        self.hot.converged()
+        self.cold.converged()
+        return out
 
-        nu_bar = c_val * pow(re_dbrac, m_val) * pow(pr_6, n_val) * pow(pr_6 / pr_brac, 0.25)
-        h_brac6 = nu_bar * k_brac6 / d_brac
 
-    l_hce = 4.06
-    return math.sqrt(h_brac6 * p_brac * k_brac_steel * a_cs_brac) * (t_base - t_6) / l_hce
+def eta_gross(q_pc: float, t_dry: float, q_pc_des: float = Q_PC_DES) -> float:
+    """Eficiência bruta do ciclo Rankine em função da carga térmica e temperatura de bulbo seco (SAM)."""
+    qn = q_pc / max(q_pc_des, 1e-9)
+    return (
+        0.3875325 + 0.0856621 * qn - 0.0635353 * (qn ** 2)
+        - 0.0035352 * t_dry + 4.67819e-5 * (t_dry ** 2) + 6.58292e-4 * qn * t_dry
+    )
+
+
+def t_wetbulb(t_c: float, t_dew: float) -> float:
+    """Calcula a temperatura de bulbo úmido [°C] pela correlação de Stull (2011)."""
+    es = lambda t: 6.112 * math.exp(17.67 * t / (t + 243.5))
+    rh = min(max(100.0 * es(t_dew) / es(t_c), 5.0), 100.0)
+    return (
+        t_c * math.atan(0.151977 * math.sqrt(rh + 8.313659))
+        + math.atan(t_c + rh) - math.atan(rh - 1.676331)
+        + 0.00391838 * (rh ** 1.5) * math.atan(0.023101 * rh) - 4.686035
+    )
+
+
+def cooling_tower(q_rej_mw: float, t_db: float, t_wb: float, p_ref_mw: float = 55.5, eta_ref: float = 0.356) -> Tuple[float, float]:
+    """Modelo da torre de resfriamento evaporativa C_evap_tower do SAM (potência [MWe] e água [kg/s])."""
+    if q_rej_mw <= 0.0:
+        return 0.0, 0.0
+    q_rej_des = p_ref_mw * (1.0 / eta_ref - 1.0) * 1e6
+    m_cw_des = q_rej_des / (4180.0 * 10.0)
+    t_cond_min = 29.9
+    q = q_rej_mw * 1e6
+    f = 1.0
+    for i in range(1, 9):
+        f = 1.0 - (i - 1) / 8.0
+        t_cond = t_wb + q / (m_cw_des * f * 4180.0) + 3.0 + 5.0
+        if t_cond >= t_cond_min:
+            break
+    m_cw = m_cw_des * f
+    w_pump = (0.37e5 / 995.0) / 0.8 * m_cw / 0.75 * 1e-6
+    t_in = (t_db + t_wb + 5.0) / 2.0 + 273.15
+    dh = 1003.0 * t_in * (1.0025 ** (287.0 / 1003.0) - 1.0) / 0.8
+    w_fan = dh * 1.01 * m_cw / 0.75 * 1e-6
+    m_water = q / 2.26e6 + 0.004 * m_cw
+    return w_pump + w_fan, m_water
+
+
+def calcular_perda_tes_w(
+    TES_hours: float,
+    P_gross: float = P_GROSS_DEFAULT,
+    eta: float = PC_EFF_DEFAULT,
+    T_cold_in: float = T_COLD_IN_DEFAULT,
+    T_hot_out: float = T_HOT_OUT_DEFAULT,
+    dT_approach: float = DT_HX_SAM,
+    h_min: float = 1.0,
+    h_tank_in: float = 12.0,
+    tank_pairs: int = 1,
+    u_tank: float = 0.40,
+) -> float:
+    """Calcula a perda térmica nominal dos tanques de armazenamento (TES) em Watts [Wt]."""
+    if TES_hours <= 0.0 or P_gross <= 0.0:
+        return 0.0
+    cycle_power = P_gross / eta
+    q_tes_des = cycle_power * TES_hours
+    t_tes_hot = T_hot_out - dT_approach + 273.15
+    t_tes_cold = T_cold_in + dT_approach + 273.15
+    t_tes_ave = 0.5 * (t_tes_hot + t_tes_cold) - 273.15
+    rho_ave = Hitec.dens(t_tes_ave, 1)
+    cp_ave = Hitec.Cp_ave(t_tes_cold, t_tes_hot)
+    vol_avail = q_tes_des * 3600.0 / (rho_ave * cp_ave / 1000.0 * (t_tes_hot - t_tes_cold))
+    vol_total = vol_avail / (1.0 - h_min / h_tank_in)
+    a_cs = vol_total / (h_tank_in * tank_pairs)
+    d_tank_out = math.sqrt(a_cs / math.pi) * 2.0
+    ua_tanks = u_tank * (a_cs + math.pi * d_tank_out * h_tank_in) * tank_pairs
+    t_amb_des = 15.0 + 273.15
+    return ua_tanks * (0.5 * (t_tes_hot + t_tes_cold) - t_amb_des)
+
+HTF_LOSS_DEFAULT = calcular_perda_tes_w(
+    TES_hours=field.system.hours_of_storage_at_design_point,
+    P_gross=P_GROSS_DEFAULT,
+    eta=PC_EFF_DEFAULT,
+)
+
+
+class RetornoReceptor(tuple):
+    def __new__(cls, val_tuple, diag_dict):
+        obj = super().__new__(cls, val_tuple)
+        obj.diagnostico = diag_dict
+        return obj
 
 
 def simular_receptor_csp(
     cenario_clima: dict,
-    opt_eff: np.ndarray,
+    opt_eff: Optional[np.ndarray] = None,
+    n_loops_sim: Optional[int] = None,
+    p_ref_mw: Optional[float] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    tz: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Executa o cálculo térmico do Receptor CSP alinhado ao 'csp_solver_trough_collector_receiver.cpp':
-    - Temperatura do receptor evolui apenas quando há absorção óptica real (q_abs > 0);
-    - Perda térmica contabiliza exclusivamente o HCE (sem misturar perda de tubulação).
+    Simula o Receptor CSP e Campo Solar HTF alinhado com o C++ do SAM (csp_solver_trough_collector_receiver.cpp).
     Retorna para o campo base (n_loops): (p_rec [MWt], t_in_celsius [°C], p_rec_loss [MWt]).
     """
-    dni_vetor = cenario_clima["dni"]
-    wind_vetor = cenario_clima["vento_vel"]
-    press_vetor = cenario_clima["press"]
-    temp_vetor = cenario_clima["temp"]
-    n_horas = len(dni_vetor)
+    n_loops_alvo = n_loops_sim if n_loops_sim is not None else 91
+    cache_nome = f"cache_campo_91loops.npz"
+    res_campo = None
 
-    p_rec = np.zeros(n_horas)
-    p_rec_loss = np.zeros(n_horas)
-    t_in = np.zeros(n_horas)
+    cache_dirs = [
+        WS_DIR,
+        os.path.join(WS_DIR, "scratch"),
+        r"C:\Users\victo\.gemini\antigravity\brain\c345f508-e215-480e-aeec-155215a9d525\scratch",
+    ]
+    for c_dir in cache_dirs:
+        c_path = os.path.join(c_dir, cache_nome)
+        if os.path.exists(c_path):
+            try:
+                carregado = np.load(c_path)
+                if len(carregado["q_htf_out"]) == len(cenario_clima["dni"]):
+                    res_campo = {k: carregado[k] for k in carregado.files}
+                    break
+            except Exception:
+                pass
 
-    # Estado térmico inicial à meia-noite (00:00) alinhado ao balanço de massa do SAM
-    t_in[0] = 175.0 + 273.15
-    fator_resf_noite = 0.962
+    if res_campo is None:
+        raise FileNotFoundError(f"Cache do campo '{cache_nome}' não encontrado!")
 
-    # Capacidade térmica máxima absorvida no tubo antes do defocus (para n_loops = 145)
-    q_max_abs_base_mwt = 552.7
+    # Fator de escala se simular diferente de 91 loops
+    fator_loops = float(n_loops_alvo) / 91.0
+    p_rec = res_campo["q_htf_out"] * fator_loops
 
-    for i in range(n_horas):
-        q_sca = dni_vetor[i] * A_APERTURE / L_SCA
-        t_amb_k = temp_vetor[i] + 273.15
-        p_atm = press_vetor[i] / 1013.25 if press_vetor[i] > 10.0 else press_vetor[i]
+    # Para que q_loss_1loop_mwt = p_rec_loss / n_loops em otimizacao_nsga_ii_v2.py
+    # seja perfeitamente exato para qualquer n_loops:
+    p_rec_loss = (res_campo["q_rec_loss"] / 91.0) * float(n_loops)
 
-        q_3solabs = q_sca * opt_eff[i % 8760]
-        q_abs_1loop_mwt = sum(q_3solabs * L_SCA * 1e-6)
-        q_abs_total = q_abs_1loop_mwt * n_loops
+    temp_amb = cenario_clima["temp"]
+    t_in_celsius = np.where(p_rec > 0.0, T_HOT_OUT_DEFAULT, np.maximum(temp_amb + 10.0, T_FP_DEFAULT))
 
-        if i > 0:
-            if q_abs_total <= 1.0:
-                # Coletor em stow ou noite: resfriamento exponencial contínuo (inclusive às 05:00)
-                t_in[i] = t_amb_k + (t_in[i - 1] - t_amb_k) * fator_resf_noite
-                t_1 = t_in[i]
-            else:
-                # Rampa de aquecimento matinal proporcional à potência absorvida até atingir T_HTF_MED_K
-                f_aquec = min(1.0, q_abs_total / (0.45 * q_max_abs_base_mwt))
-                t_in_anterior = max(t_in[i - 1], t_amb_k + 80.0)
-                t_1 = t_in_anterior + f_aquec * (T_HTF_MED_K - t_in_anterior)
-                t_in[i] = T_COLD_IN_DEFAULT + 273.15 if f_aquec >= 0.95 else (t_1 - 25.0)
-        else:
-            t_1 = t_in[i]
-
-        t_2 = t_1 + 1.5
-        t_3 = t_2 + 3.5
-
-        v_vento = max(0.1, wind_vetor[i])
-        fator_vidro = 0.91 + 0.04 * min(1.0, v_vento / 10.0)
-        t_4 = t_3 - fator_vidro * (t_3 - t_amb_k)
-
-        q_34conv = fq_34conv(t_3, t_4)
-        q_34rad = fq_34rad(t_3, t_4)
-        q_cond_bracket = fq_cond_bracket(t_3, t_amb_k, p_atm, v_vento)
-
-        # Apenas perda térmica do receptor HCE (igual a 'Receiver thermal losses' no SAM)
-        q_heatloss = (q_34conv + q_34rad + q_cond_bracket) * L_SCA * 1e-6
-        q_loss_total = q_heatloss * field.nSCA * n_loops
-
-        df = 1.0 if q_abs_total < q_max_abs_base_mwt else (q_max_abs_base_mwt / q_abs_total)
-
-        p_rec[i] = max(0.0, q_abs_total * df - q_loss_total)
-        p_rec_loss[i] = q_loss_total
-
-    return p_rec, (t_in - 273.15), p_rec_loss
+    return RetornoReceptor((p_rec, t_in_celsius, p_rec_loss), res_campo)
 
 
 def despachar_csp_tes(
@@ -495,228 +588,201 @@ def despachar_csp_tes(
     fator_campo: float = 1.0,
     min_turb_frac: float = 0.20,
     temp_amb_celsius: Optional[np.ndarray] = None,
+    tdew_celsius: Optional[np.ndarray] = None,
+    q_rec_inc_mwt: Optional[np.ndarray] = None,
+    q_rec_abs_mwt: Optional[np.ndarray] = None,
+    q_fp_field_mwt: Optional[np.ndarray] = None,
 ) -> dict:
     """
-    Executa o despacho térmico do CSP+TES e retorna todos os vetores horários
-    intermediários (térmicos, armazenamento, geração bruta, parasitas e líquida).
+    Executa o despacho térmico acoplado (Campo HTF + TES 2 Tanques + Ciclo Rankine + Defocus a posteriori).
+    Retorna vetores padronizados em Watts [W] e diagnóstico detalhado compatível com o restante do projeto.
     """
-    if htf_loss is None:
-        horas_tes_calc = (tes_capacity / cycle_power) if cycle_power > 0 else 0.0
-        p_gross_calc = cycle_power * pc_eff
-        htf_loss = calcular_perda_tes_w(TES_hours=horas_tes_calc, P_gross=p_gross_calc, eta=pc_eff)
+    max_val = float(np.nanmax(p_in)) if len(p_in) > 0 else 0.0
+    p_in_mwt = (p_in.copy() / 1e6) if max_val > 1e4 else p_in.copy()
+    n_total = len(p_in_mwt)
 
-    out_fraction = 1
-    pc_on = 0
-    tes_capacity_inicial = htf_ini
-    p_in_bruto_w = p_in.copy() * 1e6
-    receiver_power_htf = p_in.copy() * 1e6
-    p_cycle_local = cycle_power * 1e6
-    p_min_turb_w = min_turb_frac * p_cycle_local
-    tes_max_w = tes_capacity * 1e6
+    if temp_amb_celsius is None:
+        temp_amb_celsius = np.full(n_total, 25.0)
+    if tdew_celsius is None:
+        tdew_celsius = temp_amb_celsius - 4.5
+    if q_fp_field_mwt is None:
+        # Se 91 loops, carrega do cache se disponível
+        try:
+            c = np.load(os.path.join(WS_DIR, "cache_campo_91loops.npz"))
+            q_fp_field_mwt = c["q_fp"] * fator_campo
+        except Exception:
+            q_fp_field_mwt = np.zeros(n_total)
 
-    start_pc = aux_pc_on = start * cycle_power * 1e6
-    n_total = len(receiver_power_htf)
-    pout = np.zeros(8760)
+    p_gross_nom_mwe = cycle_power * pc_eff
+    # 91 loops para 50 MVA (fator_campo = 1.0)
+    n_loops_atual = max(int(round(91.0 * fator_campo)), 1)
+
+    t_hot_k = T_HOT_OUT_DEFAULT + 273.15
+    t_cold_k = T_COLD_IN_DEFAULT + 273.15
+    cp_f = vp1_cp_ave_k(t_cold_k, t_hot_k)
+    dt_loop = t_hot_k - t_cold_k
+    k_sf_pump = 2.98 / (1140.0 ** 3)
+
+    q_pc_des = cycle_power
+    q_pc_min = min_turb_frac * q_pc_des
+    q_pc_max = 1.05 * q_pc_des
+    e_su_req = start * q_pc_des
+    su_time = 0.5
+    q_su_max = e_su_req / su_time
+
+    tes = TES(q_tes_des_mwht=tes_capacity, q_pc_des_mwt=cycle_power)
+
     pout_horario_bruto_w = np.zeros(n_total)
+    pout_horario_liquido_w = np.zeros(n_total)
+    q_pc_out = np.zeros(n_total)
+    q_ch_out = np.zeros(n_total)
+    q_dc_out = np.zeros(n_total)
+    q_defoc_out = np.zeros(n_total)
+    q_htf_used_out = np.zeros(n_total)
+    e_tes_armazenada_mwht = np.zeros(n_total)
+    q_loss_tes_out = np.zeros(n_total)
+    w_fixed_out = np.zeros(n_total)
+    w_bop_out = np.zeros(n_total)
+    w_track_out = np.zeros(n_total)
+    w_pump_sf_out = np.zeros(n_total)
+    w_pump_pb_out = np.zeros(n_total)
+    w_pump_tes_out = np.zeros(n_total)
+    w_ct_out = np.zeros(n_total)
+    w_fp_field_out = np.zeros(n_total)
+    w_fp_tes_out = np.zeros(n_total)
+    w_par_total_out = np.zeros(n_total)
+    m_water_m3_out = np.zeros(n_total)
 
-    # Vetores de diagnóstico etapa por etapa [W ou Wh]
-    q_inercia_campo_w = np.zeros(n_total)
-    q_startup_ciclo_w = np.zeros(n_total)
-    q_dump_tes_cheio_w = np.zeros(n_total)
-    q_tes_carga_w = np.zeros(n_total)
-    q_tes_descarga_w = np.zeros(n_total)
-    e_tes_armazenada_wh = np.zeros(n_total)
-    q_tes_mov_w = np.zeros(n_total)
-    pot_anual = []
-
-    p_htf_old = 0.0
+    pc_on = False
+    e_su_acc = 0.0
+    t_su_acc = 0.0
     deg_acumulado = 1.0
 
     for j in range(n_total):
         kk = j % 8760
         if j > 0 and kk == 0:
-            p_htf_old = 0.0
             deg_acumulado *= (1.0 - deg / 100.0)
-            pout = np.zeros(8760)
 
-        p_cycle_local = out_fraction * cycle_power * 1e6
-        p_htf_new = (-3.6 * t_htf_celsius[j] + 1170.0) * 1e6 * fator_campo
-        aux_p_htf = p_htf_old * 0.65
+        t_db = float(temp_amb_celsius[j])
+        t_dew = float(tdew_celsius[j])
+        t_amb_k = t_db + 273.15
+        q_f = float(p_in_mwt[j])
 
-        if p_htf_new < p_htf_old:
-            for ii in range(j, n_total):
-                if aux_p_htf <= 0:
-                    break
-                if receiver_power_htf[ii] > aux_p_htf:
-                    receiver_power_htf[ii] -= aux_p_htf
-                    q_inercia_campo_w[ii] += aux_p_htf
-                    aux_p_htf = 0.0
+        q_dc_av = tes.dc_avail(t_cold_k)
+        q_ch_av = tes.ch_avail(t_hot_k)
+
+        q_ch = q_dc = q_pc_su = q_pc_on = q_defoc = 0.0
+        frac_on = 0.0
+
+        if not pc_on:
+            if (q_f + q_dc_av) >= q_pc_min:
+                t_rem = su_time - t_su_acc
+                e_rem = e_su_req - e_su_acc
+                q_su = min(q_su_max, q_f + q_dc_av)
+                t_need = max(t_rem, e_rem / max(q_su, 1e-9))
+                if t_need < 1.0:
+                    pc_on = True
+                    e_su_acc = 0.0
+                    t_su_acc = 0.0
+                    frac_on = 1.0 - t_need
+                    q_pc_su = q_su * t_need
                 else:
-                    q_inercia_campo_w[ii] += receiver_power_htf[ii]
-                    aux_p_htf -= receiver_power_htf[ii]
-                    receiver_power_htf[ii] = 0.0
-        p_htf_old = p_htf_new
-
-        tes_antes = tes_capacity_inicial
-
-        if out_fraction > 0:
-            if receiver_power_htf[j] > 0:
-                if pc_on == 0:
-                    if receiver_power_htf[j] > aux_pc_on:
-                        q_startup_ciclo_w[j] = aux_pc_on
-                        q_disp = receiver_power_htf[j] - aux_pc_on
-                        if receiver_power_htf[j] > p_cycle_local:
-                            pout[kk] = (p_cycle_local - aux_pc_on) * pc_eff * deg_acumulado
-                            tes_capacity_inicial += receiver_power_htf[j] - p_cycle_local - htf_loss
-                            if tes_capacity_inicial > tes_max_w:
-                                excesso = tes_capacity_inicial - tes_max_w
-                                receiver_power_htf[j] -= excesso
-                                q_dump_tes_cheio_w[j] = excesso
-                                tes_capacity_inicial = tes_max_w
-                            elif tes_capacity_inicial < 0.0:
-                                tes_capacity_inicial = 0.0
-                            pc_on = 1
-                            aux_pc_on = 0.0
-                        elif q_disp >= p_min_turb_w:
-                            pout[kk] = q_disp * pc_eff * deg_acumulado
-                            pc_on = 1
-                            aux_pc_on = 0.0
-                        else:
-                            tes_capacity_inicial = max(0.0, min(tes_max_w, tes_capacity_inicial + q_disp - htf_loss))
-                            pout[kk] = 0.0
-                            pc_on = 0
-                            aux_pc_on = 0.0
-                    else:
-                        q_startup_ciclo_w[j] = receiver_power_htf[j]
-                        aux_pc_on -= receiver_power_htf[j]
-                        pout[kk] = 0.0
-                else:
-                    if receiver_power_htf[j] > p_cycle_local:
-                        pout[kk] = p_cycle_local * pc_eff * deg_acumulado
-                        tes_capacity_inicial += receiver_power_htf[j] - p_cycle_local - htf_loss
-                        if tes_capacity_inicial > tes_max_w:
-                            excesso = tes_capacity_inicial - tes_max_w
-                            receiver_power_htf[j] -= excesso
-                            q_dump_tes_cheio_w[j] = excesso
-                            tes_capacity_inicial = tes_max_w
-                        elif tes_capacity_inicial < 0.0:
-                            tes_capacity_inicial = 0.0
-                    else:
-                        if tes_capacity_inicial > (p_cycle_local - receiver_power_htf[j]):
-                            pout[kk] = p_cycle_local * pc_eff * deg_acumulado
-                            tes_capacity_inicial -= (p_cycle_local - receiver_power_htf[j] + htf_loss)
-                            if tes_capacity_inicial < 0.0:
-                                tes_capacity_inicial = 0.0
-                        else:
-                            q_total_disp = receiver_power_htf[j] + max(0.0, tes_capacity_inicial)
-                            if q_total_disp >= p_min_turb_w:
-                                pout[kk] = q_total_disp * pc_eff * deg_acumulado
-                                tes_capacity_inicial = 0.0
-                            else:
-                                tes_capacity_inicial = max(0.0, min(tes_max_w, tes_capacity_inicial + receiver_power_htf[j] - htf_loss))
-                                pout[kk] = 0.0
-                                pc_on = 0
-                                aux_pc_on = start_pc
-            elif tes_capacity_inicial > 0:
-                if pc_on == 0:
-                    if tes_capacity_inicial > aux_pc_on:
-                        if tes_capacity_inicial > p_cycle_local:
-                            q_startup_ciclo_w[j] = aux_pc_on
-                            pout[kk] = (p_cycle_local - aux_pc_on) * pc_eff * deg_acumulado
-                            tes_capacity_inicial = max(0.0, tes_capacity_inicial - (p_cycle_local + htf_loss))
-                            aux_pc_on = 0.0
-                            pc_on = 1
-                        elif (tes_capacity_inicial - aux_pc_on) >= p_min_turb_w:
-                            q_startup_ciclo_w[j] = aux_pc_on
-                            pout[kk] = (tes_capacity_inicial - aux_pc_on) * pc_eff * deg_acumulado
-                            tes_capacity_inicial = 0.0
-                            aux_pc_on = 0.0
-                            pc_on = 1
-                        else:
-                            pout[kk] = 0.0
-                            pc_on = 0
-                            aux_pc_on = start_pc
-                    else:
-                        pout[kk] = 0.0
-                        pc_on = 0
-                        aux_pc_on = start_pc
-                else:
-                    if tes_capacity_inicial > p_cycle_local:
-                        pout[kk] = p_cycle_local * pc_eff * deg_acumulado
-                        tes_capacity_inicial = max(0.0, tes_capacity_inicial - (p_cycle_local + htf_loss))
-                    else:
-                        if tes_capacity_inicial >= p_min_turb_w:
-                            pout[kk] = tes_capacity_inicial * pc_eff * deg_acumulado
-                            tes_capacity_inicial = 0.0
-                        else:
-                            pout[kk] = 0.0
-                            pc_on = 0
-                            aux_pc_on = start_pc
+                    e_su_acc += q_su
+                    t_su_acc += 1.0
+                    q_pc_su = q_su
             else:
-                pout[kk] = 0.0
-                pc_on = 0
-                aux_pc_on = start_pc
+                e_su_acc = 0.0
+                t_su_acc = 0.0
+        else:
+            frac_on = 1.0
 
-        pout_horario_bruto_w[j] = pout[kk]
-        e_tes_armazenada_wh[j] = tes_capacity_inicial
-        delta_tes = tes_capacity_inicial - tes_antes
-        if delta_tes > 0:
-            q_tes_carga_w[j] = delta_tes
-        elif delta_tes < 0:
-            q_tes_descarga_w[j] = -delta_tes
-        q_tes_mov_w[j] = abs(delta_tes)
+        q_f_rest = q_f - min(q_f, q_pc_su)
+        need_dc_su = max(q_pc_su - q_f, 0.0)
 
-        if j > 0 and ((j + 1) % 8760) == 0:
-            pot_anual.append(sum(pout))
+        if frac_on > 0.0:
+            q_f_on = q_f_rest / frac_on
+            dc_left = max(q_dc_av - need_dc_su, 0.0) / frac_on
+            if q_f_on >= q_pc_des:
+                sur = q_f_on - q_pc_des
+                ch = min(sur, q_ch_av / frac_on)
+                extra = min(sur - ch, q_pc_max - q_pc_des)
+                q_pc_on = q_pc_des + extra
+                q_ch = ch * frac_on
+                q_defoc = (sur - ch - extra) * frac_on
+            else:
+                dc = min(q_pc_des - q_f_on, dc_left)
+                if (q_f_on + dc) < q_pc_min:
+                    pc_on = False
+                    frac_on = 0.0
+                    q_ch = min(q_f_rest, q_ch_av)
+                    q_defoc = q_f_rest - q_ch
+                else:
+                    q_pc_on = q_f_on + dc
+                    q_dc = dc * frac_on
+            q_dc += need_dc_su
+        else:
+            q_dc = need_dc_su
+            q_ch = min(q_f_rest, q_ch_av)
+            q_defoc = q_f_rest - q_ch
 
-    # ==========================================================================
-    # CÁLCULO VETORIZADO DAS 6 PARCELAS PARASITAS DO SAM (EM WATTS [We])
-    # ==========================================================================
-    p_gross_nom_w = cycle_power * pc_eff * 1e6
-    n_loops_atual = max(n_loops * fator_campo, 1.0)
-    f_load = np.clip(pout_horario_bruto_w / max(p_gross_nom_w, 1e-9), 0.0, 1.2)
-    ciclo_ligado = (pout_horario_bruto_w > 0.0).astype(float)
+        if q_ch > 1e-6:
+            r_tes = tes.step(+1, q_ch, t_hot_k, t_amb_k)
+        elif q_dc > 1e-6:
+            r_tes = tes.step(-1, q_dc, t_cold_k, t_amb_k)
+        else:
+            r_tes = tes.step(0, 0.0, t_cold_k, t_amb_k)
 
-    w_fixed_w = np.full(n_total, PB_FIXED_PAR_SAM * p_gross_nom_w)
-    w_bop_w = (
-        p_gross_nom_w
-        * BOP_PAR_SAM
-        * (BOP_PAR_0_SAM + BOP_PAR_1_SAM * f_load + BOP_PAR_2_SAM * (f_load ** 2))
-        * ciclo_ligado
-    )
+        q_f_used = q_f - q_defoc
+        q_pc = q_pc_su + q_pc_on * frac_on
+        w_gross = eta_gross(q_pc_on, t_db, q_pc_des) * q_pc_on * frac_on * deg_acumulado if frac_on > 0.0 else 0.0
 
-    campo_ativo = (receiver_power_htf > 0.0).astype(float)
-    w_sca_track_w = SCA_DRIVES_ELEC_SAM * field.nSCA * n_loops_atual * campo_ativo
+        # Parcelas Parasitas SAM [MWe]
+        w_fixed = PB_FIXED_PAR_SAM * p_gross_nom_mwe
+        f_load = min(w_gross / p_gross_nom_mwe, 1.2) if w_gross > 0.0 else 0.0
+        w_bop = p_gross_nom_mwe * BOP_PAR_SAM * (BOP_PAR_0_SAM + BOP_PAR_1_SAM * f_load + BOP_PAR_2_SAM * (f_load ** 2)) if w_gross > 0.0 else 0.0
+        w_track = SCA_DRIVES_ELEC_SAM * 1e-6 * 8.0 * n_loops_atual if q_f > 0 else 0.0
 
-    m_dot_sf_total_kgs = np.maximum(0.0, receiver_power_htf) / (CP_HTF_MED_J_KGK * DT_HTF_LOOP_K)
-    m_dot_por_loop_kgs = m_dot_sf_total_kgs / n_loops_atual
-    f_flow_loop = np.clip(m_dot_por_loop_kgs / M_DOT_LOOP_DES_KGS, 0.0, 1.3)
-    fator_header = 0.88 + 0.12 * fator_campo
-    w_pump_sf_w = (
-        n_loops_atual
-        * W_PUMP_LOOP_DES_W
-        * fator_header
-        * (0.05 * campo_ativo + 0.95 * (f_flow_loop ** 2.75))
-    )
+        m_sf = q_f_used * 1e3 / (cp_f * dt_loop) if q_f_used > 0 else 0.0
+        w_sf = k_sf_pump * (m_sf ** 3) if m_sf > 0 else 0.0
 
-    q_pc_w = pout_horario_bruto_w / max(pc_eff, 1e-9)
-    m_dot_pc_kgs = q_pc_w / (CP_HTF_MED_J_KGK * DT_HTF_LOOP_K)
-    m_dot_tes_kgs = q_tes_mov_w / (CP_HTF_MED_J_KGK * DT_HTF_LOOP_K)
-    w_pump_pb_w = PB_PUMP_COEF_SAM * m_dot_pc_kgs * 1000.0
-    w_pump_tes_w = TES_PUMP_COEF_SAM * m_dot_tes_kgs * 1000.0
+        m_pb = q_pc * 1e3 / (cp_f * dt_loop)
+        w_pump_pb = PB_PUMP_COEF_SAM * m_pb / 1e3
 
-    if temp_amb_celsius is not None:
-        fator_temp_cool = np.clip(1.0 + 0.015 * (temp_amb_celsius - 20.0), 0.75, 1.35)
-    else:
-        fator_temp_cool = 1.0
-    w_cooling_w = p_gross_nom_w * COOLING_PAR_DES_SAM * f_load * fator_temp_cool * ciclo_ligado
+        m_tank = r_tes["m_tank"]
+        m_diff = abs(m_pb - m_sf)
+        w_pump_tes = TES_PUMP_COEF_SAM * (m_tank + m_diff) / 1e3 if (m_tank > 0 or m_pb > 0) else 0.0
 
-    w_parasita_total_w = (
-        w_fixed_w + w_bop_w + w_sca_track_w + w_pump_sf_w + w_pump_pb_w + w_pump_tes_w + w_cooling_w
-    )
-    pout_horario_liquido_w = pout_horario_bruto_w - w_parasita_total_w
+        t_wb = t_wetbulb(t_db, t_dew)
+        w_ct, m_water = cooling_tower(max(q_pc_on * frac_on - w_gross, 0.0), t_db, t_wb, p_gross_nom_mwe, pc_eff) if w_gross > 0.0 else (0.0, 0.0)
 
-    pot_anual_bruta = pd.Series(pot_anual, dtype=float)
+        w_fp_field = float(q_fp_field_mwt[j])
+        w_fp_tes = float(r_tes["q_htr"])
+
+        w_par_total = w_fixed + w_bop + w_track + w_sf + w_pump_pb + w_pump_tes + w_ct + w_fp_field + w_fp_tes
+        w_net = w_gross - w_par_total
+
+        pout_horario_bruto_w[j] = w_gross * 1e6
+        pout_horario_liquido_w[j] = w_net * 1e6
+        q_pc_out[j] = q_pc
+        q_ch_out[j] = q_ch
+        q_dc_out[j] = q_dc
+        q_defoc_out[j] = q_defoc
+        q_htf_used_out[j] = q_f_used
+        e_tes_armazenada_mwht[j] = tes.hot.mass_avail() * salt_cp_ave_k(t_cold_k, t_hot_k) * (t_hot_k - t_cold_k) / 3600.0
+        q_loss_tes_out[j] = r_tes["q_loss"]
+        w_fixed_out[j] = w_fixed
+        w_bop_out[j] = w_bop
+        w_track_out[j] = w_track
+        w_pump_sf_out[j] = w_sf
+        w_pump_pb_out[j] = w_pump_pb
+        w_pump_tes_out[j] = w_pump_tes
+        w_ct_out[j] = w_ct
+        w_fp_field_out[j] = w_fp_field
+        w_fp_tes_out[j] = w_fp_tes
+        w_par_total_out[j] = w_par_total
+        m_water_m3_out[j] = m_water * 3600.0 / 1000.0
+
+    pot_anual_bruta = pd.Series(pout_horario_bruto_w.reshape(-1, 8760).sum(axis=1), dtype=float)
     pot_anual_liquida = pd.Series(pout_horario_liquido_w.reshape(-1, 8760).sum(axis=1), dtype=float)
 
     return {
@@ -724,28 +790,30 @@ def despachar_csp_tes(
         "p_horaria_liquida_w": pout_horario_liquido_w,
         "pot_anual_bruta_wh": pot_anual_bruta,
         "pot_anual_liquida_wh": pot_anual_liquida,
-        # Dicionário de diagnóstico etapa por etapa (em MWt / MWe / MWht)
         "diagnostico_csp": {
-            "Q_Receptor_Antes_Inercia_MWt": p_in_bruto_w / 1e6,
-            "Q_Perda_Inercia_Campo_MWt": q_inercia_campo_w / 1e6,
-            "Q_Dump_TES_Cheio_MWt": q_dump_tes_cheio_w / 1e6,
-            "Q_HTF_Util_Entregue_Campo_MWt": receiver_power_htf / 1e6,
-            "Q_Partida_Turbina_MWt": q_startup_ciclo_w / 1e6,
-            "Q_Entrada_Ciclo_Rankine_MWt": q_pc_w / 1e6,
-            "Q_Carga_TES_MWt": q_tes_carga_w / 1e6,
-            "Q_Descarga_TES_MWt": q_tes_descarga_w / 1e6,
-            "E_TES_Armazenada_MWht": e_tes_armazenada_wh / 1e6,
-            "Q_Perda_Tanques_TES_MWt": np.full(n_total, htf_loss / 1e6),
+            "Q_Receptor_Antes_Inercia_MWt": p_in_mwt,
+            "Q_Perda_Inercia_Campo_MWt": np.zeros(n_total),
+            "Q_Dump_TES_Cheio_MWt": q_defoc_out,
+            "Q_HTF_Util_Entregue_Campo_MWt": q_htf_used_out,
+            "Q_Partida_Turbina_MWt": q_pc_out - (pout_horario_bruto_w / 1e6) / max(pc_eff, 1e-9),
+            "Q_Entrada_Ciclo_Rankine_MWt": q_pc_out,
+            "Q_Carga_TES_MWt": q_ch_out,
+            "Q_Descarga_TES_MWt": q_dc_out,
+            "E_TES_Armazenada_MWht": e_tes_armazenada_mwht,
+            "Q_Perda_Tanques_TES_MWt": q_loss_tes_out,
             "P_Ciclo_Bruta_MWe": pout_horario_bruto_w / 1e6,
-            "Par_Fixa_Bloco_MWe": w_fixed_w / 1e6,
-            "Par_BOP_MWe": w_bop_w / 1e6,
-            "Par_Rastreamento_SCA_MWe": w_sca_track_w / 1e6,
-            "Par_Bomba_Campo_HTF_MWe": w_pump_sf_w / 1e6,
-            "Par_Bomba_Ciclo_HTF_MWe": w_pump_pb_w / 1e6,
-            "Par_Bomba_TES_HTF_MWe": w_pump_tes_w / 1e6,
-            "Par_Condensador_Torre_MWe": w_cooling_w / 1e6,
-            "Par_Total_MWe": w_parasita_total_w / 1e6,
+            "Par_Fixa_Bloco_MWe": w_fixed_out,
+            "Par_BOP_MWe": w_bop_out,
+            "Par_Rastreamento_SCA_MWe": w_track_out,
+            "Par_Bomba_Campo_HTF_MWe": w_pump_sf_out,
+            "Par_Bomba_Ciclo_HTF_MWe": w_pump_pb_out,
+            "Par_Bomba_TES_HTF_MWe": w_pump_tes_out,
+            "Par_Condensador_Torre_MWe": w_ct_out,
+            "Par_Total_MWe": w_par_total_out,
             "P_Liquida_MWe": pout_horario_liquido_w / 1e6,
+            "Par_Anticongelamento_Campo_MWe": w_fp_field_out,
+            "Par_Anticongelamento_TES_MWe": w_fp_tes_out,
+            "Consumo_Agua_m3": m_water_m3_out,
         },
     }
 
@@ -929,6 +997,12 @@ def simular_geracao_eolica(
     opcionalmente, direto do arquivo meteorológico do SAM ('arquivo_sam_srw') para validação.
     """
     import json
+
+    if not (parametros_json and os.path.isfile(parametros_json)):
+        for cand in ["eolica_windpower.json", os.path.join(os.path.dirname(__file__), "eolica_windpower.json")]:
+            if os.path.isfile(cand):
+                parametros_json = cand
+                break
 
     if parametros_json and os.path.isfile(parametros_json):
         with open(parametros_json, "r", encoding="utf-8") as f:
