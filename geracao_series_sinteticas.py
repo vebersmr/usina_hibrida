@@ -39,10 +39,11 @@ class SeriesClimaticas:
     vida_util: int             # Quantidade de anos simulados
     qtd_cenarios: int          # Quantidade de cenários gerados
     n_horas: int               # Total de horas (8760 * vida_util)
+    tdew: Optional[np.ndarray] = None  # Ponto de orvalho [°C]
 
     def obter_cenario(self, idx_cenario: int = 0) -> dict:
         """Retorna um dicionário com arrays 1D de um único cenário para fácil consumo."""
-        return {
+        res = {
             "dni": self.dni[:, idx_cenario],
             "dhi": self.dhi[:, idx_cenario],
             "albedo": self.albedo[:, idx_cenario],
@@ -51,6 +52,9 @@ class SeriesClimaticas:
             "vento_vel": self.vento_vel[:, idx_cenario],
             "vento_dir": self.vento_dir[:, idx_cenario],
         }
+        if self.tdew is not None:
+            res["tdew"] = self.tdew[:, idx_cenario]
+        return res
 
 
 def carregar_historico_nsrdb(
@@ -153,6 +157,10 @@ def gerar_series_climaticas(
             expandir_para_matriz(df_det['Wind Direction'].to_numpy(dtype=float))
             if 'Wind Direction' in df_det.columns else np.zeros((n_horas, qtd_cenarios))
         )
+        tdew_mat = (
+            expandir_para_matriz(df_det['Dew Point'].to_numpy(dtype=float))
+            if 'Dew Point' in df_det.columns else np.maximum(temp_mat - 4.5, -30.0)
+        )
 
         return SeriesClimaticas(
             dni=dni_mat,
@@ -165,6 +173,7 @@ def gerar_series_climaticas(
             vida_util=vida_util,
             qtd_cenarios=qtd_cenarios,
             n_horas=n_horas,
+            tdew=tdew_mat,
         )
 
     # ==========================================================================

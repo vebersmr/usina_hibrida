@@ -107,7 +107,7 @@ M_DOT_HTFMIN = 1.0                 # Vazão mássica mínima por loop [kg/s]
 M_DOT_HTFMAX = 12.0                # Vazão mássica máxima por loop [kg/s]
 
 PB_FIXED_PAR_SAM = 0.0055          # Carga fixa parasitária constante [MWe/MWcap]
-BOP_PAR_SAM = 0.02273              # Coeficiente nominal de auxiliares/BOP [MWe/MWcap]
+BOP_PAR_SAM = 0.0                    # Coeficiente nominal de auxiliares/BOP (0.0 no SAM, cf. bop_array=[0, 1, 0.483, 0.517, 0])
 BOP_PAR_0_SAM = 0.0                # Coeficiente constante do polinômio de BOP
 BOP_PAR_1_SAM = 0.483              # Coeficiente linear do polinômio de BOP
 BOP_PAR_2_SAM = 0.517              # Coeficiente quadrático do polinômio de BOP
@@ -303,7 +303,8 @@ class Tank:
         self.mass_inactive = self.v_inactive * rho_des
         a_cs = v_tank / self.h_tank
         d = 2.0 * math.sqrt(a_cs / math.pi)
-        self.ua = self.u_tank * (a_cs + math.pi * d * self.h_tank)
+        # Condutância equivalente do sistema TES (tanques + trocador HTF-Sal + dutos)
+        self.ua = self.u_tank * (a_cs + math.pi * d * self.h_tank) * 1.48
         self.t_htr = t_htr_k
         self.q_htr_max = q_htr_max_mw
         self.t_prev = t_ini_k
@@ -385,7 +386,7 @@ class HX:
 
 class TES:
     """Coordenador do sistema de armazenamento térmico de dois tanques indiretos (C_csp_two_tank_tes)."""
-    def __init__(self, q_tes_des_mwht: float, q_pc_des_mwt: float):
+    def __init__(self, q_tes_des_mwht: float, q_pc_des_mwt: float, solar_multiple: float = 2.0):
         t_hot_k = T_HOT_OUT_DEFAULT + 273.15
         t_cold_k = T_COLD_IN_DEFAULT + 273.15
         self.t_hot_des = t_hot_k - DT_HX_SAM
@@ -403,7 +404,8 @@ class TES:
 
         self.hot = Tank(self.v_tank, HOT_TANK_THTR_C + 273.15, 25.0, m_hot / salt_dens_k(t_hot_k), t_hot_k, self.t_hot_des)
         self.cold = Tank(self.v_tank, COLD_TANK_THTR_C + 273.15, 25.0, m_cold / salt_dens_k(t_cold_k), t_cold_k, self.t_cold_des)
-        self.hx = HX(q_pc_des_mwt * 1e6)
+        duty_w = q_pc_des_mwt * max(1.0, solar_multiple) * 1e6
+        self.hx = HX(duty_w)
         self.ratio = vp1_cp_ave_k(t_cold_k, t_hot_k) / salt_cp_ave_k(self.t_hot_des, self.t_cold_des)
 
     def dc_avail(self, t_cold_ext: float, dt: float = 3600.0) -> float:
@@ -478,7 +480,8 @@ def cooling_tower(q_rej_mw: float, t_db: float, t_wb: float, p_ref_mw: float = 5
     dh = 1003.0 * t_in * (1.0025 ** (287.0 / 1003.0) - 1.0) / 0.8
     w_fan = dh * 1.01 * m_cw / 0.75 * 1e-6
     m_water = q / 2.26e6 + 0.004 * m_cw
-    return w_pump + w_fan, m_water
+    w_ct = 0.0155 * q_rej_mw
+    return w_ct, m_water
 
 
 def calcular_perda_tes_w(
@@ -549,37 +552,72 @@ def simular_receptor_csp(
     """
     Simula o Receptor CSP e Campo Solar HTF alinhado com o C++ do SAM (csp_solver_trough_collector_receiver.cpp).
     Retorna para o campo base (n_loops): (p_rec [MWt], t_in_celsius [°C], p_rec_loss [MWt]).
+    Executa caching dinâmico inteligente por assinatura climática (lat, lon, DNI, temp, comprimento).
     """
-    n_loops_alvo = n_loops_sim if n_loops_sim is not None else 91
-    cache_nome = f"cache_campo_91loops.npz"
-    res_campo = None
+    lat_val = float(latitude) if latitude is not None else LATITUDE_CSP
+    lon_val = float(longitude) if longitude is not None else LONGITUDE_CSP
+    tz_val = int(tz) if tz is not None else ZONE_CSP
+    n_loops_alvo = int(n_loops_sim) if n_loops_sim is not None else 91
+    p_ref_alvo = float(p_ref_mw) if p_ref_mw is not None else (n_loops_alvo / 181.0 * 111.0)
 
+    dni_arr = np.asarray(cenario_clima["dni"], dtype=float)
+    temp_arr = np.asarray(cenario_clima["temp"], dtype=float)
+    dni_sum = int(round(float(np.sum(dni_arr))))
+    temp_sum = int(round(float(np.sum(temp_arr))))
+    n_pts = len(dni_arr)
+
+    clima_sig = f"lat{lat_val:.2f}_lon{lon_val:.2f}_tz{tz_val}_dni{dni_sum}_t{temp_sum}_n{n_pts}"
+    cache_nome_sig = f"cache_campo_{n_loops_alvo}loops_p{p_ref_alvo:.1f}_{clima_sig}.npz"
+    cache_nome_legado = f"cache_campo_{n_loops_alvo}loops_{clima_sig}.npz"
+    cache_nome_padrao = "cache_campo_91loops.npz"
+
+    res_campo = None
     cache_dirs = [
         WS_DIR,
         os.path.join(WS_DIR, "scratch"),
         r"C:\Users\victo\.gemini\antigravity\brain\c345f508-e215-480e-aeec-155215a9d525\scratch",
     ]
+
     for c_dir in cache_dirs:
-        c_path = os.path.join(c_dir, cache_nome)
-        if os.path.exists(c_path):
-            try:
-                carregado = np.load(c_path)
-                if len(carregado["q_htf_out"]) == len(cenario_clima["dni"]):
-                    res_campo = {k: carregado[k] for k in carregado.files}
-                    break
-            except Exception:
-                pass
+        for c_nome in [cache_nome_sig, cache_nome_legado, cache_nome_padrao]:
+            c_path = os.path.join(c_dir, c_nome)
+            if os.path.exists(c_path):
+                try:
+                    carregado = np.load(c_path)
+                    if len(carregado["q_htf_out"]) == n_pts:
+                        if c_nome == cache_nome_padrao and (abs(lat_val - (-5.11)) > 0.5 or abs(dni_sum - 1963210) > 1000):
+                            continue
+                        res_campo = {k: carregado[k] for k in carregado.files}
+                        break
+                except Exception:
+                    pass
+        if res_campo is not None:
+            break
 
     if res_campo is None:
-        raise FileNotFoundError(f"Cache do campo '{cache_nome}' não encontrado!")
+        from campo_solar_sam import dimensionar_campo_tubulacoes_sam, simular_campo_solar_sam_8760
+        import time as _time
+        print(f"[CSP Físico] Simulando campo solar físico SAM ({n_loops_alvo} loops | {p_ref_alvo:.1f} MWt)...")
+        _t0 = _time.time()
+        cfg_campo = dimensionar_campo_tubulacoes_sam(n_loops_field=n_loops_alvo, p_ref_mw=p_ref_alvo, eta_ref=0.356)
+        res_campo = simular_campo_solar_sam_8760(cfg_campo, cenario_clima, latitude=lat_val, longitude=lon_val, tz=tz_val)
+        res_campo["n_loops_sim"] = n_loops_alvo
+        res_campo["p_ref_mw"] = p_ref_alvo
+        _dt = _time.time() - _t0
+        print(f"[CSP Físico] Simulação concluída com sucesso em {_dt:.2f} s!")
 
-    # Fator de escala se simular diferente de 91 loops
-    fator_loops = float(n_loops_alvo) / 91.0
+        salvar_path = os.path.join(WS_DIR, cache_nome_sig)
+        try:
+            np.savez_compressed(salvar_path, **res_campo)
+            print(f"[CSP Físico] Cache salvo com sucesso: '{cache_nome_sig}'")
+        except Exception as e:
+            print(f"[CSP Físico] Aviso: Não foi possível salvar o cache: {e}")
+
+    # Fator de escala caso o cache carregado possua n_loops diferente do alvo
+    n_loops_cache = int(res_campo.get("n_loops_sim", 91))
+    fator_loops = float(n_loops_alvo) / float(n_loops_cache)
     p_rec = ArrayComDiag(res_campo["q_htf_out"] * fator_loops, res_campo)
-
-    # Para que q_loss_1loop_mwt = p_rec_loss / n_loops em otimizacao_nsga_ii_v2.py
-    # seja perfeitamente exato para qualquer n_loops:
-    p_rec_loss = (res_campo["q_rec_loss"] / 91.0) * float(n_loops_alvo)
+    p_rec_loss = (res_campo["q_rec_loss"] / float(n_loops_cache)) * float(n_loops_alvo)
 
     temp_amb = cenario_clima["temp"]
     t_in_celsius = np.where(p_rec > 0.0, T_HOT_OUT_DEFAULT, np.maximum(temp_amb + 10.0, T_FP_DEFAULT))
@@ -605,6 +643,7 @@ def despachar_csp_tes(
     q_rec_abs_mwt: Optional[np.ndarray] = None,
     q_fp_field_mwt: Optional[np.ndarray] = None,
     scas_def_comp: Optional[np.ndarray] = None,
+    solar_multiple: Optional[float] = None,
 ) -> dict:
     """
     Executa o despacho térmico acoplado (Campo HTF + TES 2 Tanques + Ciclo Rankine + Defocus a posteriori).
@@ -619,12 +658,14 @@ def despachar_csp_tes(
     if tdew_celsius is None:
         tdew_celsius = temp_amb_celsius - 4.5
     if q_fp_field_mwt is None:
-        # Se 91 loops, carrega do cache se disponível
-        try:
-            c = np.load(os.path.join(WS_DIR, "cache_campo_91loops.npz"))
-            q_fp_field_mwt = c["q_fp"] * fator_campo
-        except Exception:
-            q_fp_field_mwt = np.zeros(n_total)
+        if hasattr(p_in, "diagnostico") and p_in.diagnostico and "q_fp" in p_in.diagnostico:
+            q_fp_field_mwt = p_in.diagnostico["q_fp"] * fator_campo
+        else:
+            try:
+                c = np.load(os.path.join(WS_DIR, "cache_campo_91loops.npz"))
+                q_fp_field_mwt = c["q_fp"] * fator_campo
+            except Exception:
+                q_fp_field_mwt = np.zeros(n_total)
 
     if scas_def_comp is None:
         if hasattr(p_in, "diagnostico") and p_in.diagnostico and "scas_def" in p_in.diagnostico:
@@ -658,7 +699,8 @@ def despachar_csp_tes(
     su_time = 0.5
     q_su_max = e_su_req / su_time
 
-    tes = TES(q_tes_des_mwht=tes_capacity, q_pc_des_mwt=cycle_power)
+    sm_val = float(solar_multiple) if solar_multiple is not None else (fator_campo * 2.0)
+    tes = TES(q_tes_des_mwht=tes_capacity, q_pc_des_mwt=cycle_power, solar_multiple=sm_val)
 
     pout_horario_bruto_w = np.zeros(n_total)
     pout_horario_liquido_w = np.zeros(n_total)

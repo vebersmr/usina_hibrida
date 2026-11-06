@@ -360,6 +360,15 @@ class CacheFisicoUnitario:
     q_rec_inc_1loop_mwt: Optional[np.ndarray] = None
     e_int_1loop_mwt: Optional[np.ndarray] = None
     scas_def: Optional[np.ndarray] = None
+    q_piping_loss_1loop_mwt: Optional[np.ndarray] = None
+    n_loops_base: int = 91
+    p_csp_mva_base: float = 50.0
+    latitude: float = -13.27
+    longitude: float = -43.42
+    tz: int = -3
+    perfis_exatos_loops: Optional[Dict[int, np.ndarray]] = None
+    perfis_exatos_q_fp: Optional[Dict[int, np.ndarray]] = None
+    cenario_clima: Optional[dict] = None
 
 
 def precalcular_perfis_unitarios(
@@ -369,6 +378,8 @@ def precalcular_perfis_unitarios(
     ano_base_solar: int = 2021,
     json_eolica: str = r"hibrido\eolica\sam\eolica_windpower.json",
     arquivo_sam_eolica: str = None,
+    n_loops_base: Optional[int] = None,
+    p_csp_mva_base: Optional[float] = None,
 ) -> CacheFisicoUnitario:
     n_horas = len(cenario_clima["temp"])
 
@@ -381,20 +392,32 @@ def precalcular_perfis_unitarios(
     else:
         lat, lon, tz, alt, bs_pv = -13.27, -43.42, -3, 446.0, 13.27
 
-    res_rec, t_in_c, p_loss_base = simular_receptor_csp(cenario_clima)
-    diag_rec = getattr(res_rec, "diagnostico", {})
-    n_loops_base = 91.0
+    n_base = int(n_loops_base) if n_loops_base is not None else (181 if (p_csp_mva_base == 100.0) else 91)
+    p_base_mva = float(p_csp_mva_base) if p_csp_mva_base is not None else (100.0 if n_base == 181 else 50.0)
+    p_ref_gross = p_base_mva * (111.0 / 100.0)
 
-    p_rec_1loop = np.asarray(res_rec) / n_loops_base
-    q_abs_1loop = (diag_rec["q_rec_abs"] / n_loops_base) if (diag_rec and "q_rec_abs" in diag_rec) else (p_rec_1loop + p_loss_base / n_loops_base)
-    q_loss_1loop = (diag_rec["q_rec_loss"] / n_loops_base) if (diag_rec and "q_rec_loss" in diag_rec) else (p_loss_base / n_loops_base)
-    q_inc_1loop = (diag_rec["q_inc_sf"] / n_loops_base) if (diag_rec and "q_inc_sf" in diag_rec) else p_rec_1loop
-    q_fp_1loop = (diag_rec["q_fp"] / n_loops_base) if (diag_rec and "q_fp" in diag_rec) else np.zeros_like(p_rec_1loop)
+    res_rec, t_in_c, p_loss_base = simular_receptor_csp(
+        cenario_clima,
+        n_loops_sim=n_base,
+        p_ref_mw=p_ref_gross,
+        latitude=lat,
+        longitude=lon,
+        tz=tz,
+    )
+    diag_rec = getattr(res_rec, "diagnostico", {})
+    n_loops_norm = float(n_base)
+
+    p_rec_1loop = np.asarray(res_rec) / n_loops_norm
+    q_abs_1loop = (diag_rec["q_rec_abs"] / n_loops_norm) if (diag_rec and "q_rec_abs" in diag_rec) else (p_rec_1loop + p_loss_base / n_loops_norm)
+    q_loss_1loop = (diag_rec["q_rec_loss"] / n_loops_norm) if (diag_rec and "q_rec_loss" in diag_rec) else (p_loss_base / n_loops_norm)
+    q_inc_1loop = (diag_rec["q_inc_sf"] / n_loops_norm) if (diag_rec and "q_inc_sf" in diag_rec) else p_rec_1loop
+    q_fp_1loop = (diag_rec["q_fp"] / n_loops_norm) if (diag_rec and "q_fp" in diag_rec) else np.zeros_like(p_rec_1loop)
     cos_th_1loop = diag_rec.get("cos_th", np.ones_like(p_rec_1loop))
-    q_inc_costh_1loop = (diag_rec["q_inc_costh"] / n_loops_base) if (diag_rec and "q_inc_costh" in diag_rec) else q_inc_1loop
-    q_rec_inc_1loop = (diag_rec["q_rec_inc"] / n_loops_base) if (diag_rec and "q_rec_inc" in diag_rec) else q_abs_1loop
-    e_int_1loop = (diag_rec["e_int_energy"] / n_loops_base) if (diag_rec and "e_int_energy" in diag_rec) else np.zeros_like(p_rec_1loop)
+    q_inc_costh_1loop = (diag_rec["q_inc_costh"] / n_loops_norm) if (diag_rec and "q_inc_costh" in diag_rec) else q_inc_1loop
+    q_rec_inc_1loop = (diag_rec["q_rec_inc"] / n_loops_norm) if (diag_rec and "q_rec_inc" in diag_rec) else q_abs_1loop
+    e_int_1loop = (diag_rec["e_int_energy"] / n_loops_norm) if (diag_rec and "e_int_energy" in diag_rec) else np.zeros_like(p_rec_1loop)
     scas_def_comp = diag_rec.get("scas_def", np.ones_like(p_rec_1loop))
+    q_piping_loss_1loop = (diag_rec["q_piping_loss"] / n_loops_norm) if (diag_rec and "q_piping_loss" in diag_rec) else np.zeros_like(p_rec_1loop)
 
     n_anos = max(1, int(math.ceil(n_horas / 8760)))
     p_rec_1loop_mwt = np.tile(p_rec_1loop, n_anos)[:n_horas]
@@ -407,6 +430,7 @@ def precalcular_perfis_unitarios(
     q_rec_inc_1loop_mwt = np.tile(q_rec_inc_1loop, n_anos)[:n_horas]
     e_int_1loop_mwt = np.tile(e_int_1loop, n_anos)[:n_horas]
     scas_def_rep = np.tile(scas_def_comp, n_anos)[:n_horas]
+    q_piping_loss_1loop_mwt = np.tile(q_piping_loss_1loop, n_anos)[:n_horas]
     t_in_c = np.tile(t_in_c, n_anos)[:n_horas]
     temp_amb_celsius = cenario_clima["temp"]
 
@@ -438,6 +462,30 @@ def precalcular_perfis_unitarios(
     )
     p_eol_ref_100mw_w = res_eol["p_eolica_w"]
 
+    perfis_exatos = {n_base: np.asarray(res_rec)[:n_horas]}
+    perfis_q_fp = {n_base: (diag_rec["q_fp"][:n_horas] if (diag_rec and "q_fp" in diag_rec) else np.zeros(n_horas))}
+
+    # Auto-descoberta de outros caches salvos para a mesma localidade/clima
+    dni_arr = np.asarray(cenario_clima["dni"], dtype=float)
+    temp_arr = np.asarray(cenario_clima["temp"], dtype=float)
+    dni_sum = int(round(float(np.sum(dni_arr))))
+    temp_sum = int(round(float(np.sum(temp_arr))))
+    n_pts = len(dni_arr)
+    clima_sig = f"lat{lat:.2f}_lon{lon:.2f}_tz{tz}_dni{dni_sum}_t{temp_sum}_n{n_pts}"
+
+    import glob
+    ws_dir = os.path.dirname(os.path.abspath(__file__))
+    for f_c in glob.glob(os.path.join(ws_dir, f"cache_campo_*_{clima_sig}.npz")):
+        try:
+            dados = np.load(f_c)
+            n_l = int(dados.get("n_loops_sim", 0))
+            if n_l > 0 and len(dados["q_htf_out"]) == n_pts:
+                perfis_exatos[n_l] = np.asarray(dados["q_htf_out"])[:n_horas]
+                if "q_fp" in dados:
+                    perfis_q_fp[n_l] = np.asarray(dados["q_fp"])[:n_horas]
+        except Exception:
+            pass
+
     return CacheFisicoUnitario(
         n_horas=n_horas,
         vida_util_sim=vida_util_sim,
@@ -455,6 +503,16 @@ def precalcular_perfis_unitarios(
         q_rec_inc_1loop_mwt=q_rec_inc_1loop_mwt,
         e_int_1loop_mwt=e_int_1loop_mwt,
         scas_def=scas_def_rep,
+        q_piping_loss_1loop_mwt=q_piping_loss_1loop_mwt,
+        n_loops_base=n_base,
+        p_csp_mva_base=p_base_mva,
+        latitude=lat,
+        longitude=lon,
+        tz=tz,
+        perfis_exatos_loops=perfis_exatos,
+        perfis_exatos_q_fp=perfis_q_fp,
+        cenario_clima=cenario_clima,
+
     )
 
 
@@ -482,7 +540,14 @@ def avaliar_configuracao_hibrida(
         n_loops_escalado = int(math.ceil(n_loops * fator_bloco_csp * (sm_csp / 2.0)))
         fator_campo_real = n_loops_escalado / 91.0
 
-        if hasattr(cache, "p_rec_1loop_mwt") and cache.p_rec_1loop_mwt is not None:
+        p_rec_escalado = None
+        q_fp_campo = None
+
+        if hasattr(cache, "perfis_exatos_loops") and cache.perfis_exatos_loops and (n_loops_escalado in cache.perfis_exatos_loops):
+            p_rec_escalado = cache.perfis_exatos_loops[n_loops_escalado]
+            if hasattr(cache, "perfis_exatos_q_fp") and cache.perfis_exatos_q_fp and (n_loops_escalado in cache.perfis_exatos_q_fp):
+                q_fp_campo = cache.perfis_exatos_q_fp[n_loops_escalado]
+        elif hasattr(cache, "p_rec_1loop_mwt") and cache.p_rec_1loop_mwt is not None:
             p_rec_escalado = cache.p_rec_1loop_mwt * n_loops_escalado
         else:
             p_max_abs_mwt = 544.0 * (n_loops_escalado / float(n_loops))
@@ -490,6 +555,9 @@ def avaliar_configuracao_hibrida(
             q_loss_total = cache.q_loss_1loop_mwt * n_loops_escalado
             df_vec = np.where(q_abs_total < p_max_abs_mwt, 1.0, p_max_abs_mwt / np.maximum(q_abs_total, 1e-9))
             p_rec_escalado = np.maximum(0.0, q_abs_total * df_vec - q_loss_total)
+
+        if q_fp_campo is None:
+            q_fp_campo = cache.q_fp_1loop_mwt * n_loops_escalado if cache.q_fp_1loop_mwt is not None else None
 
         cycle_thermal_power_esc = CYCLE_THERMAL_POWER * fator_bloco_csp
         tes_cap_esc = cycle_thermal_power_esc * horas_tes
@@ -504,8 +572,9 @@ def avaliar_configuracao_hibrida(
             deg=DEGRADATION_CSP_DEFAULT,
             fator_campo=fator_campo_real,
             temp_amb_celsius=cache.temp_amb_celsius,
-            q_fp_field_mwt=cache.q_fp_1loop_mwt * n_loops_escalado if cache.q_fp_1loop_mwt is not None else None,
+            q_fp_field_mwt=q_fp_campo,
             scas_def_comp=cache.scas_def if hasattr(cache, "scas_def") else None,
+            solar_multiple=sm_csp,
         )
         AVAIL_CSP = 0.96  # Fator de disponibilidade anual padrão SAM (96%)
         p_csp_w = res_csp["p_horaria_liquida_w"] * AVAIL_CSP
@@ -688,7 +757,12 @@ class ProblemaHibridoNSGA2(ElementwiseProblem):
 # 6. VALIDAÇÃO COM O SAM E EXECUÇÃO PRINCIPAL DA OTIMIZAÇÃO
 # ==============================================================================
 
-def executar_validacao_sam(cache: CacheFisicoUnitario) -> pd.DataFrame:
+def executar_validacao_sam(
+    cache: CacheFisicoUnitario,
+    cenario_clima: Optional[dict] = None,
+) -> pd.DataFrame:
+    clima = cenario_clima if cenario_clima is not None else getattr(cache, "cenario_clima", None)
+
     casos_validacao = [
         {"Tec": "CSP_Isolado", "p_csp": 50,  "p_pv": 0,   "p_eol": 0,   "tes": 5.0, "sm": 2.0, "raz_pv": 1.0},
         {"Tec": "CSP_Isolado", "p_csp": 100, "p_pv": 0,   "p_eol": 0,   "tes": 5.0, "sm": 2.0, "raz_pv": 1.0},
@@ -700,6 +774,25 @@ def executar_validacao_sam(cache: CacheFisicoUnitario) -> pd.DataFrame:
 
     linhas = []
     for c in casos_validacao:
+        if c["p_csp"] > 0 and clima is not None:
+            fator_bloco = c["p_csp"] / 100.0
+            n_l = int(math.ceil(n_loops * fator_bloco * (c["sm"] / 2.0)))
+            if hasattr(cache, "perfis_exatos_loops") and cache.perfis_exatos_loops is not None:
+                if n_l not in cache.perfis_exatos_loops:
+                    p_ref_gross = c["p_csp"] * (111.0 / 100.0)
+                    res_ex, _, _ = simular_receptor_csp(
+                        clima,
+                        n_loops_sim=n_l,
+                        p_ref_mw=p_ref_gross,
+                        latitude=getattr(cache, "latitude", -13.27),
+                        longitude=getattr(cache, "longitude", -43.42),
+                        tz=getattr(cache, "tz", -3),
+                    )
+                    diag_ex = getattr(res_ex, "diagnostico", {})
+                    cache.perfis_exatos_loops[n_l] = np.asarray(res_ex)[:cache.n_horas]
+                    if diag_ex and "q_fp" in diag_ex and hasattr(cache, "perfis_exatos_q_fp") and cache.perfis_exatos_q_fp is not None:
+                        cache.perfis_exatos_q_fp[n_l] = diag_ex["q_fp"][:cache.n_horas]
+
         r = avaliar_configuracao_hibrida(
             cache=cache,
             p_csp_mva=c["p_csp"],
@@ -723,16 +816,21 @@ def executar_validacao_sam(cache: CacheFisicoUnitario) -> pd.DataFrame:
             "VPL_MUSD": round(r["vpl_musd"], 2),
         })
 
-    df_val = pd.DataFrame(linhas)
+    # Ajusta nomes de colunas para independência do SAM
+    df_val = pd.DataFrame(linhas).rename(columns={
+        "SAM_Loops_CSP": "Loops_CSP",
+        "SAM_Modulos_PV": "Modulos_PV",
+        "SAM_Turbinas_EOL": "Turbinas_EOL",
+    })
     print("\n" + "=" * 105)
-    print("TABELA DE VALIDAÇÃO FÍSICA E FINANCEIRA (BASEADA EM 'analise_fin.py' E SAM)")
+    print("TABELA DE AVALIAÇÃO FÍSICA E FINANCEIRA DAS TECNOLOGIAS")
     print("=" * 105)
     print(df_val.to_string(index=False))
     print("=" * 105)
     return df_val
 
 
-def exportar_auditoria_csp_sam(
+def exportar_auditoria_csp(
     cenario_clima: dict,
     cache: CacheFisicoUnitario,
     p_csp_mva: float = 50.0,
@@ -741,9 +839,8 @@ def exportar_auditoria_csp_sam(
     arquivo_saida: str = "auditoria_csp_50mva.xlsx",
 ) -> pd.DataFrame:
     """
-    Exporta a auditoria horária (8760h) e o balanço anual da usina CSP,
-    mantendo estritamente as colunas equivalentes às da planilha de referência SAM
-    (SAM_Macau_2017.xlsx) para validação visual e quantitativa direta.
+    Exporta a auditoria horária (8760h) e o balanço anual da usina CSP simulada pelo modelo,
+    focando estritamente nos resultados da própria simulação física (sem dependência de dados externos do SAM).
     """
     fator_bloco_csp = p_csp_mva / 100.0
     n_loops_escalado = int(math.ceil(n_loops * fator_bloco_csp * (sm_csp / 2.0)))
@@ -751,24 +848,12 @@ def exportar_auditoria_csp_sam(
 
     a_aperture_loop = field.col.reflective_aperture_area * field.nSCA
     area_total_m2 = a_aperture_loop * n_loops_escalado
-    dni_w_m2 = cenario_clima["dni"][:8760]
+    dni_w_m2 = np.asarray(cenario_clima["dni"][:8760], dtype=float)
+    temp_amb = np.asarray(cenario_clima["temp"][:8760], dtype=float)
 
-    # Carrega timestamps e dados de referência do SAM se existirem
-    sam_ref_path = "SAM_Macau_2017.xlsx"
-    df_sam_ref = None
-    time_stamps = None
-    if os.path.exists(sam_ref_path):
-        try:
-            df_sam_ref = pd.read_excel(sam_ref_path)
-            if "Time stamp" in df_sam_ref.columns:
-                time_stamps = df_sam_ref["Time stamp"].values
-        except Exception:
-            pass
+    time_stamps = pd.date_range("2021-01-01 00:00:00", periods=8760, freq="h").strftime("%Y-%m-%d %H:%M:%S")
 
-    if time_stamps is None:
-        time_stamps = pd.date_range("2001-01-01 00:00:00", periods=8760, freq="h").strftime("%Y-%m-%d %H:%M:%S")
-
-    # 1. Grandezas do campo solar
+    # 1. Grandezas físicas do campo solar
     if hasattr(cache, "q_inc_1loop_mwt") and cache.q_inc_1loop_mwt is not None:
         q_inc_sf = cache.q_inc_1loop_mwt[:8760] * n_loops_escalado
     else:
@@ -787,6 +872,7 @@ def exportar_auditoria_csp_sam(
         q_rec_inc = cache.q_abs_1loop_mwt[:8760] * n_loops_escalado
 
     q_rec_loss = cache.q_loss_1loop_mwt[:8760] * n_loops_escalado
+    q_piping_loss = cache.q_piping_loss_1loop_mwt[:8760] * n_loops_escalado if (hasattr(cache, "q_piping_loss_1loop_mwt") and cache.q_piping_loss_1loop_mwt is not None) else np.zeros(8760)
     q_rec_abs = cache.q_abs_1loop_mwt[:8760] * n_loops_escalado
 
     if hasattr(cache, "e_int_1loop_mwt") and cache.e_int_1loop_mwt is not None:
@@ -801,6 +887,38 @@ def exportar_auditoria_csp_sam(
         df_vec = np.where(q_rec_abs < p_max_abs_mwt, 1.0, p_max_abs_mwt / np.maximum(q_rec_abs, 1e-9))
         p_rec_escalado_mwt = np.maximum(0.0, q_rec_abs * df_vec - q_rec_loss)
 
+    # Verificacao de fidelidade fisica: se n_loops_escalado diferir da base do cache,
+    # executa ou carrega a simulacao fisica dimensionada para a usina alvo (headers, runners e tubulacoes reais)
+    n_base_cache = getattr(cache, "n_loops_base", 91)
+    if n_loops_escalado != n_base_cache:
+        p_ref_gross = p_csp_mva * (111.0 / 100.0)
+        lat_c = getattr(cache, "latitude", -13.27)
+        lon_c = getattr(cache, "longitude", -43.42)
+        tz_c = getattr(cache, "tz", -3)
+        res_exato, _, _ = simular_receptor_csp(
+            cenario_clima,
+            n_loops_sim=n_loops_escalado,
+            p_ref_mw=p_ref_gross,
+            latitude=lat_c,
+            longitude=lon_c,
+            tz=tz_c,
+        )
+        diag_ex = getattr(res_exato, "diagnostico", {})
+        if diag_ex:
+            q_inc_sf = diag_ex.get("q_inc_sf", q_inc_sf)[:8760]
+            q_inc_costh = diag_ex.get("q_inc_costh", q_inc_costh)[:8760]
+            q_rec_inc = diag_ex.get("q_rec_inc", q_rec_inc)[:8760]
+            q_rec_loss = diag_ex.get("q_rec_loss", q_rec_loss)[:8760]
+            q_rec_abs = diag_ex.get("q_rec_abs", q_rec_abs)[:8760]
+            q_piping_loss = diag_ex.get("q_piping_loss", q_piping_loss)[:8760]
+            e_int_energy = diag_ex.get("e_int_energy", e_int_energy)[:8760]
+            p_rec_escalado_mwt = np.asarray(res_exato)[:8760]
+
+        if hasattr(cache, "perfis_exatos_loops") and cache.perfis_exatos_loops is not None:
+            cache.perfis_exatos_loops[n_loops_escalado] = p_rec_escalado_mwt
+            if diag_ex and "q_fp" in diag_ex and hasattr(cache, "perfis_exatos_q_fp") and cache.perfis_exatos_q_fp is not None:
+                cache.perfis_exatos_q_fp[n_loops_escalado] = diag_ex["q_fp"][:8760]
+
     # 2. Despacho Térmico e Ciclo Rankine
     cycle_thermal_power_esc = CYCLE_THERMAL_POWER * fator_bloco_csp
     tes_cap_esc = cycle_thermal_power_esc * horas_tes
@@ -814,25 +932,32 @@ def exportar_auditoria_csp_sam(
         pc_eff=PC_EFF_DEFAULT,
         deg=DEGRADATION_CSP_DEFAULT,
         fator_campo=fator_campo_real,
-        temp_amb_celsius=cenario_clima["temp"][:8760],
+        temp_amb_celsius=temp_amb,
         q_fp_field_mwt=cache.q_fp_1loop_mwt[:8760] * n_loops_escalado if cache.q_fp_1loop_mwt is not None else None,
         scas_def_comp=cache.scas_def[:8760] if (hasattr(cache, "scas_def") and cache.scas_def is not None) else None,
+        solar_multiple=sm_csp,
     )
     diag = res_csp["diagnostico_csp"]
     AVAIL_CSP = 0.96
 
-    # 3. Montagem estrita da planilha de auditoria equivalente à do SAM
+    df_ctrl = diag.get("df_ctrl", np.ones(8760))
+    q_rec_inc_real = q_rec_inc * df_ctrl
+    q_rec_abs_real = q_rec_abs * df_ctrl
+    q_htf_leaving_real = diag.get("Q_HTF_Util_Entregue_Campo_MWt", p_rec_escalado_mwt)
+
+    # 3. Planilha Horária 8760h (Resultados Físicos do Modelo)
     df_horario = pd.DataFrame({
         "Time stamp": time_stamps,
         "Resource Beam normal irradiance | (W/m2)": dni_w_m2,
         "Field thermal power incident | (MWt)": q_inc_sf,
         "Field collector cosine efficiency": cos_th,
         "Field thermal power incident after cosine | (MWt)": q_inc_costh,
-        "Receiver thermal power incident | (MWt)": q_rec_inc,
+        "Receiver thermal power incident | (MWt)": q_rec_inc_real,
         "Receiver thermal losses | (MWt)": q_rec_loss,
-        "Receiver thermal power absorbed | (MWt)": q_rec_abs,
+        "Receiver thermal power absorbed | (MWt)": q_rec_abs_real,
         "Field change in material/htf internal energy | (MWt)": e_int_energy,
-        "Field thermal power leaving in HTF | (MWt)": p_rec_escalado_mwt,
+        "Field piping thermal losses | (MWt)": q_piping_loss,
+        "Field thermal power leaving in HTF | (MWt)": q_htf_leaving_real,
         "TES charge thermal power | (MWt)": diag["Q_Carga_TES_MWt"],
         "TES discharge thermal power | (MWt)": diag["Q_Descarga_TES_MWt"],
         "PC input energy | (MWt)": diag["Q_Entrada_Ciclo_Rankine_MWt"],
@@ -842,7 +967,7 @@ def exportar_auditoria_csp_sam(
         "System net electrical power (96% availability) | (MWe)": diag["P_Liquida_MWe"] * AVAIL_CSP,
     })
 
-    # 4. Aba de detalhamento dos parasitas auxiliares do bloco de potência e campo
+    # 4. Detalhamento dos Consumos Parasitários Auxiliares
     df_parasitas = pd.DataFrame({
         "Hora_Ano": np.arange(1, 8761),
         "P_Ciclo_Bruta_MWe": diag["P_Ciclo_Bruta_MWe"],
@@ -853,88 +978,100 @@ def exportar_auditoria_csp_sam(
         "Par_Bomba_Ciclo_HTF_MWe": diag["Par_Bomba_Ciclo_HTF_MWe"],
         "Par_Bomba_TES_HTF_MWe": diag["Par_Bomba_TES_HTF_MWe"],
         "Par_Condensador_Torre_MWe": diag["Par_Condensador_Torre_MWe"],
+        "Par_Anticongelamento_Campo_MWe": diag.get("Par_Anticongelamento_Campo_MWe", np.zeros(8760)),
+        "Par_Anticongelamento_TES_MWe": diag.get("Par_Anticongelamento_TES_MWe", np.zeros(8760)),
         "Par_Total_MWe": diag["Par_Total_MWe"],
         "P_Liquida_MWe": diag["P_Liquida_MWe"],
         "P_Liquida_Disponivel_MWe": diag["P_Liquida_MWe"] * AVAIL_CSP,
-        "Par_Anticongelamento_Campo_MWe": diag.get("Par_Anticongelamento_Campo_MWe", np.zeros(8760)),
-        "Par_Anticongelamento_TES_MWe": diag.get("Par_Anticongelamento_TES_MWe", np.zeros(8760)),
         "Consumo_Agua_m3": diag.get("Consumo_Agua_m3", np.zeros(8760)),
         "E_TES_Armazenada_MWht": diag["E_TES_Armazenada_MWht"],
         "Q_Dump_TES_Cheio_MWt": diag["Q_Dump_TES_Cheio_MWt"],
     })
 
-    # 5. Comparativo direto coluna a coluna com a planilha de referência do SAM
-    linhas_comp = []
-    if df_sam_ref is not None:
-        for col in df_sam_ref.columns:
-            if col == "Time stamp" or col not in df_horario.columns:
-                continue
-            s_sam = df_sam_ref[col].values
-            s_mod = df_horario[col].values
+    # 5. Resumo Anual Consolidado do Modelo (Sem dados do SAM)
+    dni_total_kwh_m2 = float(np.sum(dni_w_m2) / 1000.0)
+    e_inc_campo_gwh = float(np.sum(q_inc_sf) / 1000.0)
+    cos_th_medio = float(np.mean(cos_th))
+    e_inc_costh_gwh = float(np.sum(q_inc_costh) / 1000.0)
+    e_rec_inc_gwh = float(np.sum(q_rec_inc_real) / 1000.0)
+    e_rec_loss_gwh = float(np.sum(q_rec_loss) / 1000.0)
+    e_rec_abs_gwh = float(np.sum(q_rec_abs_real) / 1000.0)
+    e_int_campo_gwh = float(np.sum(e_int_energy) / 1000.0)
+    e_pipe_loss_gwh = float(np.sum(q_piping_loss) / 1000.0)
+    e_htf_util_gwh = float(np.sum(q_htf_leaving_real) / 1000.0)
+    e_tes_ch_gwh = float(np.sum(diag["Q_Carga_TES_MWt"]) / 1000.0)
+    e_tes_dc_gwh = float(np.sum(diag["Q_Descarga_TES_MWt"]) / 1000.0)
+    e_tes_loss_gwh = float(np.sum(diag.get("Q_Perda_Tanques_TES_MWt", np.zeros(8760))) / 1000.0)
+    e_defoc_gwh = float(np.sum(diag["Q_Dump_TES_Cheio_MWt"]) / 1000.0)
+    e_pc_in_gwh = float(np.sum(diag["Q_Entrada_Ciclo_Rankine_MWt"]) / 1000.0)
+    e_pc_gross_gwh = float(np.sum(diag["P_Ciclo_Bruta_MWe"]) / 1000.0)
+    e_par_tot_gwh = float(np.sum(diag["Par_Total_MWe"]) / 1000.0)
+    e_net_100_gwh = float(np.sum(diag["P_Liquida_MWe"]) / 1000.0)
+    e_net_96_gwh = e_net_100_gwh * AVAIL_CSP
+    fc_gross_pct = (e_pc_gross_gwh * 1000.0 / (p_csp_mva * 8760.0)) * 100.0
+    fc_net_100_pct = (e_net_100_gwh * 1000.0 / (p_csp_mva * 8760.0)) * 100.0
+    fc_net_96_pct = (e_net_96_gwh * 1000.0 / (p_csp_mva * 8760.0)) * 100.0
+    frac_foco_media = float(np.mean(diag["Field_fraction_of_focused_SCAs"]))
+    consumo_agua_tot_m3 = float(np.sum(diag.get("Consumo_Agua_m3", np.zeros(8760))))
+    fp_campo_mwh = float(np.sum(diag.get("Par_Anticongelamento_Campo_MWe", np.zeros(8760))) * 1000.0)
+    fp_tes_mwh = float(np.sum(diag.get("Par_Anticongelamento_TES_MWe", np.zeros(8760))) * 1000.0)
 
-            # Indicadores estatísticos horários
-            mae = float(np.mean(np.abs(s_mod - s_sam)))
-            corr = float(np.corrcoef(s_mod, s_sam)[0, 1]) if (np.std(s_mod) > 1e-9 and np.std(s_sam) > 1e-9) else 1.0
+    resumo_linhas = [
+        {"Categoria": "Recurso Solar", "Grandeza": "DNI Total Anual", "Unidade": "kWh/m²", "Valor": round(dni_total_kwh_m2, 2)},
+        {"Categoria": "Campo Solar",   "Grandeza": "Área Coletora Total", "Unidade": "m²", "Valor": round(area_total_m2, 1)},
+        {"Categoria": "Campo Solar",   "Grandeza": "Número de Loops", "Unidade": "-", "Valor": n_loops_escalado},
+        {"Categoria": "Campo Solar",   "Grandeza": "Energia Térmica Incidente no Campo", "Unidade": "GWht", "Valor": round(e_inc_campo_gwh, 3)},
+        {"Categoria": "Campo Solar",   "Grandeza": "Eficiência Média de Cosseno do Coletor", "Unidade": "-", "Valor": round(cos_th_medio, 3)},
+        {"Categoria": "Campo Solar",   "Grandeza": "Energia Incidente após Cosseno", "Unidade": "GWht", "Valor": round(e_inc_costh_gwh, 3)},
+        {"Categoria": "Receptor",      "Grandeza": "Energia Incidente no Receptor", "Unidade": "GWht", "Valor": round(e_rec_inc_gwh, 3)},
+        {"Categoria": "Receptor",      "Grandeza": "Perdas Térmicas no Receptor", "Unidade": "GWht", "Valor": round(e_rec_loss_gwh, 3)},
+        {"Categoria": "Receptor",      "Grandeza": "Energia Absorvida no Receptor", "Unidade": "GWht", "Valor": round(e_rec_abs_gwh, 3)},
+        {"Categoria": "Campo Solar",   "Grandeza": "Variação de Energia Interna no Campo", "Unidade": "GWht", "Valor": round(e_int_campo_gwh, 3)},
+        {"Categoria": "Campo Solar",   "Grandeza": "Perdas Térmicas nas Tubulações do Campo", "Unidade": "GWht", "Valor": round(e_pipe_loss_gwh, 3)},
+        {"Categoria": "Campo Solar",   "Grandeza": "Energia Térmica Útil Entregue pelo HTF", "Unidade": "GWht", "Valor": round(e_htf_util_gwh, 3)},
+        {"Categoria": "TES",           "Grandeza": "Energia Térmica Carregada no TES", "Unidade": "GWht", "Valor": round(e_tes_ch_gwh, 3)},
+        {"Categoria": "TES",           "Grandeza": "Energia Térmica Descarregada do TES", "Unidade": "GWht", "Valor": round(e_tes_dc_gwh, 3)},
+        {"Categoria": "TES",           "Grandeza": "Perdas Térmicas nos Tanques do TES", "Unidade": "GWht", "Valor": round(e_tes_loss_gwh, 3)},
+        {"Categoria": "Operação",      "Grandeza": "Energia Térmica Rejeitada por Defoco (Dump)", "Unidade": "GWht", "Valor": round(e_defoc_gwh, 3)},
+        {"Categoria": "Ciclo Rankine", "Grandeza": "Energia Injetada no Ciclo de Potência", "Unidade": "GWht", "Valor": round(e_pc_in_gwh, 3)},
+        {"Categoria": "Ciclo Rankine", "Grandeza": "Geração Elétrica Bruta", "Unidade": "GWhe", "Valor": round(e_pc_gross_gwh, 3)},
+        {"Categoria": "Parasitas",     "Grandeza": "Consumo Parasitário Elétrico Total", "Unidade": "GWhe", "Valor": round(e_par_tot_gwh, 3)},
+        {"Categoria": "Geração Líquida","Grandeza": "Geração Elétrica Líquida (100% disp)", "Unidade": "GWhe", "Valor": round(e_net_100_gwh, 3)},
+        {"Categoria": "Geração Líquida","Grandeza": "Geração Elétrica Líquida (96% disp)", "Unidade": "GWhe", "Valor": round(e_net_96_gwh, 3)},
+        {"Categoria": "Desempenho",    "Grandeza": "Fator de Capacidade Bruto", "Unidade": "%", "Valor": round(fc_gross_pct, 2)},
+        {"Categoria": "Desempenho",    "Grandeza": "Fator de Capacidade Líquido (100% disp)", "Unidade": "%", "Valor": round(fc_net_100_pct, 2)},
+        {"Categoria": "Desempenho",    "Grandeza": "Fator de Capacidade Líquido (96% disp)", "Unidade": "%", "Valor": round(fc_net_96_pct, 2)},
+        {"Categoria": "Controle",      "Grandeza": "Fração Média de SCAs Focados", "Unidade": "-", "Valor": round(frac_foco_media, 4)},
+        {"Categoria": "Água",          "Grandeza": "Consumo Total de Água de Resfriamento", "Unidade": "m³", "Valor": round(consumo_agua_tot_m3, 1)},
+        {"Categoria": "Proteção",      "Grandeza": "Anticongelamento do Campo Solar", "Unidade": "MWhe", "Valor": round(fp_campo_mwh, 2)},
+        {"Categoria": "Proteção",      "Grandeza": "Anticongelamento dos Tanques TES", "Unidade": "MWhe", "Valor": round(fp_tes_mwh, 2)},
+    ]
+    df_resumo = pd.DataFrame(resumo_linhas)
 
-            if "efficiency" in col.lower() or "fraction" in col.lower():
-                val_sam = float(np.mean(s_sam))
-                val_mod = float(np.mean(s_mod))
-                unid = "Média (-)"
-                dif_pct = ((val_mod - val_sam) / val_sam) * 100.0 if abs(val_sam) > 1e-9 else 0.0
-            else:
-                val_sam = float(np.sum(s_sam)) / 1000.0  # GWh ou GWht
-                val_mod = float(np.sum(s_mod)) / 1000.0
-                unid = "GWh"
-                dif_pct = ((val_mod - val_sam) / val_sam) * 100.0 if abs(val_sam) > 1e-9 else 0.0
-
-            linhas_comp.append({
-                "Coluna": col,
-                "Unidade": unid,
-                "SAM_Macau_2017": round(val_sam, 3),
-                "Modelo_Hibrido": round(val_mod, 3),
-                "Diferenca_Abs": round(val_mod - val_sam, 3),
-                "Diferenca_%": round(dif_pct, 2),
-                "MAE_Horario": round(mae, 4),
-                "Correlacao_r": round(corr, 4),
-            })
-
-    # Adiciona indicadores globais consolidados
-    e_liq_96_sam = 144.868
-    e_liq_96_mod = float(df_horario["System net electrical power (96% availability) | (MWe)"].sum() / 1000.0)
-    fc_liq_sam = 33.11
-    fc_liq_mod = float((df_horario["System net electrical power (96% availability) | (MWe)"].sum() / (p_csp_mva * 8760.0)) * 100.0)
-
-    linhas_comp.append({
-        "Coluna": "System net electrical power (96% availability)",
-        "Unidade": "GWh",
-        "SAM_Macau_2017": round(e_liq_96_sam, 3),
-        "Modelo_Hibrido": round(e_liq_96_mod, 3),
-        "Diferenca_Abs": round(e_liq_96_mod - e_liq_96_sam, 3),
-        "Diferenca_%": round(((e_liq_96_mod - e_liq_96_sam) / e_liq_96_sam) * 100.0, 2),
-        "MAE_Horario": round(float(np.mean(np.abs(df_horario["System net electrical power (96% availability) | (MWe)"].values - (df_sam_ref["System net electrical power | (MWe)"].values * 0.96)))) if df_sam_ref is not None else 0.0, 4),
-        "Correlacao_r": 1.0,
-    })
-    linhas_comp.append({
-        "Coluna": "Fator de Capacidade Liquido (96% disp)",
-        "Unidade": "%",
-        "SAM_Macau_2017": round(fc_liq_sam, 2),
-        "Modelo_Hibrido": round(fc_liq_mod, 2),
-        "Diferenca_Abs": round(fc_liq_mod - fc_liq_sam, 2),
-        "Diferenca_%": round(((fc_liq_mod - fc_liq_sam) / fc_liq_sam) * 100.0, 2),
-        "MAE_Horario": 0.0,
-        "Correlacao_r": 1.0,
-    })
-
-    df_comp = pd.DataFrame(linhas_comp)
-
-    with pd.ExcelWriter(arquivo_saida) as writer:
-        df_comp.to_excel(writer, sheet_name="Comparativo_SAM", index=False)
-        df_horario.to_excel(writer, sheet_name="Horario_8760h", index=False)
-        df_parasitas.to_excel(writer, sheet_name="Parasitas_Detalhados", index=False)
-
-    print(f"\n[OK] Auditoria CSP exportada com sucesso para '{arquivo_saida}'!")
-    print(df_comp.to_string(index=False))
+    try:
+        with pd.ExcelWriter(arquivo_saida) as writer:
+            df_resumo.to_excel(writer, sheet_name="Resumo_Anual", index=False)
+            df_horario.to_excel(writer, sheet_name="Horario_8760h", index=False)
+            df_parasitas.to_excel(writer, sheet_name="Parasitas_Detalhados", index=False)
+        print(f"\n[OK] Auditoria CSP exportada com sucesso para '{arquivo_saida}'!")
+    except PermissionError:
+        arquivo_alt = arquivo_saida.replace(".xlsx", "_novo.xlsx")
+        with pd.ExcelWriter(arquivo_alt) as writer:
+            df_resumo.to_excel(writer, sheet_name="Resumo_Anual", index=False)
+            df_horario.to_excel(writer, sheet_name="Horario_8760h", index=False)
+            df_parasitas.to_excel(writer, sheet_name="Parasitas_Detalhados", index=False)
+        print(f"\n[AVISO] '{arquivo_saida}' está aberto no Excel. Auditoria salva em '{arquivo_alt}'!")
+        arquivo_saida = arquivo_alt
+    print("=" * 95)
+    print(f"AUDITORIA ANUAL DA USINA CSP ({p_csp_mva:.1f} MVA | TES: {horas_tes:.1f}h | SM: {sm_csp:.2f})")
+    print("=" * 95)
+    print(df_resumo.to_string(index=False))
+    print("=" * 95)
     return df_horario
+
+
+# Alias retrocompatível
+exportar_auditoria_csp_sam = exportar_auditoria_csp
 
 
 if __name__ == "__main__":
@@ -958,7 +1095,7 @@ if __name__ == "__main__":
         vida_util=1,
         qtd_cenarios=1,
         modo_deterministico=True,
-        ano_deterministico=2017,
+        ano_deterministico=2015,
         incluir_dhi_albedo=True,
     )
     cenario_0 = clima.obter_cenario(0)
@@ -969,7 +1106,7 @@ if __name__ == "__main__":
         cenario_0,
         vida_util_sim=1,
         metadados_loc=metadados_loc,
-        ano_base_solar=2017
+        ano_base_solar=2015
         # arquivo_sam_eolica=r'projeto_hibrido\WY Southern-Flat Lands.txt' # Descomentar para validação com o SAM
     )
     print(f"Física unitária pré-calculada em {time.time() - t0:.2f} s!")
@@ -977,13 +1114,13 @@ if __name__ == "__main__":
     exportar_auditoria_csp_sam(
         cenario_clima=cenario_0,
         cache=cache_fisico,
-        p_csp_mva=50.0,
+        p_csp_mva=100.0,
         horas_tes=5.0,
         sm_csp=2.0,
-        arquivo_saida="auditoria_csp_50mva.xlsx",
+        arquivo_saida="auditoria_csp_100mva_teste.xlsx",
     )
 
-    df_validacao = executar_validacao_sam(cache_fisico)
+    df_validacao = executar_validacao_sam(cache_fisico, cenario_0)
 
     # malha_100mva = gerar_malha_potencias(potencia_total_mva=100, passo_mva=10)
 

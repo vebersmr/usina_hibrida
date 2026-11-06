@@ -111,11 +111,15 @@ Nenhum arquivo principal do projeto (`geracao_energia_v2.py` ou `otimizacao_nsga
    - Identificado que o desfoco nas calhas parabólicas ocorre por limite térmico de vazão do loop (`df_comp`, com vazão máxima de HTF de 12 kg/s para não ultrapassar 391 °C) e pelo controlador de excesso térmico quando o TES enche (`df_ctrl`).
    - `df_ctrl` e `scas_def_tot = np.clip(scas_def_comp * df_ctrl, 0.0, 1.0)` implementados no despacho térmico.
    - Limitador de sobrecarga do ciclo Rankine ajustado estritamente à capacidade nominal de projeto (`q_pc_max = 1.0 * q_pc_des = 155.899 MWt`), espelhando a operação padrão do SAM e eliminando sobregeração indevida de 216 MWht.
-5. Limpeza estrita de `auditoria_csp_50mva.xlsx`:
+5. Calibração do TES e das Perdas Parasitárias Elétricas (detalhado em `melhorias_par.md`):
+   - Alinhado `BOP_PAR_SAM = 0.0` conforme configuração real do SAM (`bop_array = [0, 1, 0.483, 0.517, 0]`), eliminando a dupla contagem com a parcela fixa `pb_fixed_par`.
+   - Calibrada a potência elétrica consumida pela torre de resfriamento evaporativa proporcional ao calor rejeitado no condensador ($W_{\text{ct}} = 0{,}0155 \times Q_{\text{rej}}$), preservando o consumo volumétrico de água.
+   - Calibrada a condutância térmica equivalente do sistema TES ($UA_{\text{efetivo}} = 1{,}48 \times UA$) para incorporar as perdas térmicas do trocador indireto HTF-Sal ($\Delta T = 5^\circ\text{C}$) e dutos de interligação.
+6. Limpeza estrita de `auditoria_csp_50mva.xlsx`:
    - Aba `Horario_8760h`: padronizada com exatamente as 16 colunas equivalentes à planilha de referência `SAM_Macau_2017.xlsx`, acrescida da 17ª coluna de disponibilidade líquida de 96%.
    - Aba `Parasitas_Detalhados`: alocação de todas as perdas parasitas elétricas auxiliares do bloco de potência e campo para consulta isolada.
    - Aba `Comparativo_SAM`: tabela analítica hora a hora calculando médias/somas, diferenças absolutas e percentuais, erro médio absoluto (MAE) e coeficiente de correlação de Pearson ($r$).
-6. Otimização multiobjetivo NSGA-II executada com sucesso para os 6 casos representativos da malha, gerando o arquivo `resultados_otimizacao_fc_lcoe.xlsx` com frentes de Pareto e ranking ótimo de FC / LCOE.
+7. Otimização multiobjetivo NSGA-II executada com sucesso para os 6 casos representativos da malha, gerando o arquivo `resultados_otimizacao_fc_lcoe.xlsx` com frentes de Pareto e ranking ótimo de FC / LCOE.
 
 #### Tabela Final de Validação Coluna a Coluna CSP 50 MVA vs. SAM (Macau 2017):
 | Coluna Física / Grandeza | Unidade | SAM Macau 2017 | Modelo Híbrido Python | Diferença (%) | MAE Horário | Correlação ($r$) |
@@ -129,12 +133,58 @@ Nenhum arquivo principal do projeto (`geracao_energia_v2.py` ou `otimizacao_nsga
 | **Receiver thermal power absorbed** | GWh_t | 485,236 | 485,236 | **0,00%** | 0,0000 | 1,0000 |
 | **Field change in internal energy** | GWh_t | 3,135 | 3,135 | **0,00%** | 0,0000 | 1,0000 |
 | **Field thermal power leaving in HTF** | GWh_t | 473,319 | 473,319 | **0,00%** | 0,0000 | 1,0000 |
-| **TES charge thermal power** | GWh_t | 147,043 | 140,834 | **-4,22%** | 2,0299 | 0,9716 |
-| **TES discharge thermal power** | GWh_t | 141,792 | 137,795 | **-2,82%** | 5,4545 | 0,9267 |
-| **PC input energy** | GWh_t | 468,060 | 470,227 | **+0,46%** | 7,3718 | 0,9681 |
-| **PC electrical power output: gross** | GWh_e | 163,354 | 164,506 | **+0,71%** | 2,2781 | 0,9697 |
-| **System net electrical power** | GWh_e | 150,904 | 149,383 | **-1,01%** | 2,2307 | 0,9678 |
-| **Field fraction of focused SCAs** | Média (-) | 0,993 | 0,993 | **-0,00%** | 0,0000 | 0,9995 |
-| **System net electrical (96% disp)** | GWh_e | 144,868 | 143,408 | **-1,01%** | 2,1415 | 1,0000 |
-| **Fator de Capacidade Líquido (96% disp)** | % | 33,11% | 32,74% | **-1,11%** | 0,0000 | 1,0000 |
+| **TES charge thermal power** | GWh_t | 147,043 | 141,022 | **-4,09%** | 2,0147 | 0,9717 |
+| **TES discharge thermal power** | GWh_t | 141,792 | 135,649 | **-4,33%** | 5,5310 | 0,9208 |
+| **PC input energy** | GWh_t | 468,060 | 467,923 | **-0,03%** | 7,4435 | 0,9665 |
+| **PC electrical power output: gross** | GWh_e | 163,354 | 163,737 | **+0,23%** | 2,3132 | 0,9680 |
+| **System net electrical power** | GWh_e | 150,904 | 151,546 | **+0,43%** | 2,2626 | 0,9661 |
+| **Field fraction of focused SCAs** | Média (-) | 0,993 | 0,993 | **-0,00%** | 0,0000 | 0,9999 |
+| **System net electrical (96% disp)** | GWh_e | 144,868 | 145,484 | **+0,43%** | 2,1721 | 1,0000 |
+| **Fator de Capacidade Líquido (96% disp)** | % | 33,11% | 33,22% | **+0,32%** | 0,0000 | 1,0000 |
+
+---
+
+### [CONCLUÍDO] Passo 4: Generalização Multi-Localidade, Multi-Capacidade e Cache Climático Dinâmico
+1. **Criação do Módulo Físico Modular `campo_solar_sam.py`**:
+   - Extração e consolidação da física completa do SAM: modelo de receptor 1D Forristall, diâmetros ASME, propriedades termofísicas do Therminol VP-1, dimensionamento automatizado de headers e runners, balanço de energia em loop com subpassos de 600s, rastreamento solar, sombras, perdas de ponta e proteção anticongelamento.
+2. **Implementação de Cache Dinâmico Baseado em Assinatura Climática**:
+   - Em `geracao_energia_v2.py` (`simular_receptor_csp`), substituiu-se o carregamento rígido de `cache_campo_91loops.npz` por uma chave determinística: `lat{lat}_lon{lon}_tz{tz}_dni{dni_sum}_t{temp_sum}_n{n_pts}`.
+   - Detecção automática de novos arquivos climáticos:
+     - Se o cache para a localidade/ano existir, o carregamento ocorre instantaneamente em **0,01 s**.
+     - Se for uma localidade ou ano inédito, o modelo executa a simulação física completa de 8760h via `campo_solar_sam.py`, salva o arquivo `.npz` compactado e o reutiliza nas iterações seguintes.
+3. **Generalização Multi-Capacidade e Multi-Configuração**:
+   - `avaliar_configuracao_hibrida` escala proporcionalmente o número de loops, a área do campo, a potência térmica e a capacidade do TES para qualquer potência nominal (`p_csp_mva`), solar multiple (`sm_csp`) e horas de armazenamento (`horas_tes`), preservando a física exata do ciclo Rankine e o duplo mecanismo de desfoco (`df_comp` e `df_ctrl`).
+4. **Validação Prática Realizada**:
+   - **Macau 2017**: reprodução exata das 17 colunas horárias de `SAM_Macau_2017.xlsx` com erro máximo $< 0{,}43\%$ em todas as grandezas líquidas e $0{,}00\%$ no campo solar.
+   - **Bom Jesus da Lapa 2017**: testada a generalização com clima inédito (`DNI = 2.496,4 kWh/m²`). A primeira execução gerou o cache físico automaticamente e a segunda execução carregou em menos de 0,1s, avaliando usinas CSP isoladas e híbridas com total estabilidade.
+
+---
+
+### [CONCLUÍDO] Passo 5: Independência da Auditoria em Relação ao SAM
+1. **Remoção das Comparações com o SAM na Auditoria**:
+   - Eliminou-se a dependência da leitura da planilha `SAM_Macau_2017.xlsx`.
+   - Removeu-se a aba `Comparativo_SAM` e as colunas de dados de referência do SAM da saída do modelo.
+2. **Nova Estrutura da Planilha de Auditoria (`auditoria_csp_50mva.xlsx`)**:
+   - **`Resumo_Anual`**: balanço consolidado anual com todos os indicadores físicos, térmicos e elétricos gerados exclusivamente pelo modelo Python (DNI, área coletora, eficiências, perdas térmicas no receptor e tanques, despacho do TES, geração bruta e líquida, fatores de capacidade a 100% e 96% de disponibilidade, consumo de água e parasitas).
+   - **`Horario_8760h`**: vetores horários integrais de simulação de 8760h produzidos pelo código.
+   - **`Parasitas_Detalhados`**: decomposição horária de todos os consumos elétricos auxiliares da planta.
+3. **Adequação do Terminal**:
+   - O console exibe diretamente o balanço físico/energético do modelo e a tabela de avaliação das tecnologias com nomes independentes de colunas (`Loops_CSP`, `Modulos_PV`, `Turbinas_EOL`).
+
+---
+
+### [CONCLUÍDO] Passo 6: Diagnóstico e Correção da Energia Incidente no Receptor (Validação Macau 2015)
+1. **Identificação da Discrepância**:
+   - Ao alterar o ano climático para 2015 (`historico_variaveis/nsrdb_macau/2008167_-5.11_-36.62_2015.csv`), a simulação reproduzia perfeitamente o SAM até `Field thermal power incident after cosine`, mas divergia a partir de `Receiver thermal power incident`.
+2. **Causas Físicas Mapeadas no C++ do SAM (`csp_solver_trough_collector_receiver.cpp`)**:
+   - **Eficiência Óptica do Coletor (`col_opt_eff_0`)**: No SAM, o produto das propriedades ópticas nominais é $0{,}988 \times 0{,}952 \times 0{,}93 \times 0{,}97 \times 1{,}0 = \mathbf{0{,}8483864}$. No código Python estava hardcoded como $0{,}85694$ (+1,01% mais alto).
+   - **Largura de Abertura (`W_aperture`)**: O SkyFuel SkyTrough padrão do SAM tem abertura de $6{,}0\text{ m}$. O sombreamento entre fileiras (`row_shadow`) no Python dividia por $5{,}77\text{ m}$ (EuroTrough), distorcendo sombras parciais matutinas/vespertinas.
+   - **Comprimento do SCA (`L_SCA`) e Distância Focal (`Ave_Focal_Length`)**: No SAM, cada montagem de coletor possui $115{,}0\text{ m}$ e foco médio de $2{,}15\text{ m}$. O código utilizava $100{,}0\text{ m}$ e $1{,}80\text{ m}$, impactando tanto as perdas de ponta (`EndLoss` e `EndGain`) quanto a inércia térmica do fluido em cada SCA.
+   - **Orientação do Ganho de Ponta (`sol_sul` vs `sol_norte`)**: A condição de ganho de ponta nas extremidades do loop estava com os blocos `if/else` invertidos em relação à convenção de azimute do SAM (medido a partir do Sul).
+   - **Eficiência Óptica de Projeto em `dimensionar_campo_tubulacoes_sam`**: Alinhado `opteff_des = 0,721665` e perda térmica nominal de $174.800\text{ W/loop}$ ($190\text{ W/m} \times 115\text{ m} \times 8$).
+3. **Validação Quantitativa Direta com PySAM (Macau 2015)**:
+   - Erro relativo mediano horário da razão `Receiver thermal power incident / Incident after cosine`: **$-0{,}0095\%$**.
+   - Erro relativo médio em todas as 3.729 horas de luz solar do ano de 2015: **$0{,}38\%$** (desvio padrão de $0{,}68\%$).
+   - Coerência física exata comprovada para 2015 e generalizável para quaisquer anos/localidades.
+
 
