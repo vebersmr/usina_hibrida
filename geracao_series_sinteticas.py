@@ -40,6 +40,7 @@ class SeriesClimaticas:
     qtd_cenarios: int          # Quantidade de cenários gerados
     n_horas: int               # Total de horas (8760 * vida_util)
     tdew: Optional[np.ndarray] = None  # Ponto de orvalho [°C]
+    arquivo_origem: Optional[str] = None # Caminho do arquivo meteorológico lido (modo determinístico)
 
     def obter_cenario(self, idx_cenario: int = 0) -> dict:
         """Retorna um dicionário com arrays 1D de um único cenário para fácil consumo."""
@@ -54,6 +55,8 @@ class SeriesClimaticas:
         }
         if self.tdew is not None:
             res["tdew"] = self.tdew[:, idx_cenario]
+        if self.arquivo_origem is not None:
+            res["arquivo_origem"] = self.arquivo_origem
         return res
 
 
@@ -174,6 +177,7 @@ def gerar_series_climaticas(
             qtd_cenarios=qtd_cenarios,
             n_horas=n_horas,
             tdew=tdew_mat,
+            arquivo_origem=arquivo,
         )
 
     # ==========================================================================

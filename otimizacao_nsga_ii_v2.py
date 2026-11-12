@@ -42,6 +42,7 @@ from geracao_energia_v2 import (
     simular_geracao_eolica,
     simular_geracao_pv,
     simular_receptor_csp,
+    obter_simulacao_pysam,
 )
 
 # ==============================================================================
@@ -562,6 +563,9 @@ def avaliar_configuracao_hibrida(
         cycle_thermal_power_esc = CYCLE_THERMAL_POWER * fator_bloco_csp
         tes_cap_esc = cycle_thermal_power_esc * horas_tes
 
+        q_rec_inc_tot = cache.q_rec_inc_1loop_mwt * n_loops_escalado if hasattr(cache, "q_rec_inc_1loop_mwt") and cache.q_rec_inc_1loop_mwt is not None else None
+        q_rec_abs_tot = cache.q_abs_1loop_mwt * n_loops_escalado if hasattr(cache, "q_abs_1loop_mwt") and cache.q_abs_1loop_mwt is not None else None
+
         res_csp = despachar_csp_tes(
             p_in=p_rec_escalado,
             t_htf_celsius=cache.t_in_celsius,
@@ -572,6 +576,8 @@ def avaliar_configuracao_hibrida(
             deg=DEGRADATION_CSP_DEFAULT,
             fator_campo=fator_campo_real,
             temp_amb_celsius=cache.temp_amb_celsius,
+            q_rec_inc_mwt=q_rec_inc_tot,
+            q_rec_abs_mwt=q_rec_abs_tot,
             q_fp_field_mwt=q_fp_campo,
             scas_def_comp=cache.scas_def if hasattr(cache, "scas_def") else None,
             solar_multiple=sm_csp,
@@ -923,6 +929,37 @@ def exportar_auditoria_csp(
     cycle_thermal_power_esc = CYCLE_THERMAL_POWER * fator_bloco_csp
     tes_cap_esc = cycle_thermal_power_esc * horas_tes
 
+    # Tenta obter a simulação física oficial SAM via PySAM (se arquivo meteorológico disponível)
+    arquivo_clima = cenario_clima.get("arquivo_origem") if cenario_clima is not None else None
+    if not arquivo_clima or not os.path.exists(arquivo_clima):
+        dni_sum_alvo = int(round(float(np.sum(dni_w_m2))))
+        base_hist = os.path.join(os.path.dirname(__file__), "historico_variaveis")
+        for pasta_nome in ["nsrdb_macau", "nsrdb", "nsrdb_norte", "nsrdb_novo"]:
+            p_dir = os.path.join(base_hist, pasta_nome)
+            if os.path.exists(p_dir):
+                for fn in sorted(os.listdir(p_dir)):
+                    if fn.endswith(".csv"):
+                        fp = os.path.join(p_dir, fn)
+                        try:
+                            d_test = pd.read_csv(fp, skiprows=2, usecols=["DNI"])
+                            if abs(int(round(float(d_test["DNI"].sum()))) - dni_sum_alvo) < 50:
+                                arquivo_clima = fp
+                                break
+                        except Exception:
+                            pass
+                if arquivo_clima:
+                    break
+
+    p_ref_gross = p_csp_mva * (111.0 / 100.0)
+    sim_pysam = None
+    if arquivo_clima and os.path.exists(arquivo_clima):
+        sim_pysam = obter_simulacao_pysam(
+            weather_file=arquivo_clima,
+            p_ref_mw=p_ref_gross,
+            tshours=horas_tes,
+            n_loops_sim=n_loops_escalado,
+        )
+
     res_csp = despachar_csp_tes(
         p_in=p_rec_escalado_mwt,
         t_htf_celsius=cache.t_in_celsius[:8760],
@@ -933,6 +970,8 @@ def exportar_auditoria_csp(
         deg=DEGRADATION_CSP_DEFAULT,
         fator_campo=fator_campo_real,
         temp_amb_celsius=temp_amb,
+        q_rec_inc_mwt=q_rec_inc,
+        q_rec_abs_mwt=q_rec_abs,
         q_fp_field_mwt=cache.q_fp_1loop_mwt[:8760] * n_loops_escalado if cache.q_fp_1loop_mwt is not None else None,
         scas_def_comp=cache.scas_def[:8760] if (hasattr(cache, "scas_def") and cache.scas_def is not None) else None,
         solar_multiple=sm_csp,
@@ -941,8 +980,8 @@ def exportar_auditoria_csp(
     AVAIL_CSP = 0.96
 
     df_ctrl = diag.get("df_ctrl", np.ones(8760))
-    q_rec_inc_real = q_rec_inc * df_ctrl
-    q_rec_abs_real = q_rec_abs * df_ctrl
+    q_rec_inc_real = diag.get("q_rec_inc", q_rec_inc * df_ctrl)
+    q_rec_abs_real = diag.get("q_rec_abs", q_rec_abs * df_ctrl)
     q_htf_leaving_real = diag.get("Q_HTF_Util_Entregue_Campo_MWt", p_rec_escalado_mwt)
 
     # 3. Planilha Horária 8760h (Resultados Físicos do Modelo)
@@ -1048,11 +1087,34 @@ def exportar_auditoria_csp(
     ]
     df_resumo = pd.DataFrame(resumo_linhas)
 
+    df_comp_sam = None
+    if sim_pysam is not None:
+        comp_linhas = [
+            {"Categoria": "Campo Solar", "Grandeza": "Energia Incidente no Campo", "Unidade": "GWht", "SAM": round(float(np.sum(sim_pysam["q_inc_sf"])/1e3), 3), "Python": round(e_inc_campo_gwh, 3)},
+            {"Categoria": "Receptor", "Grandeza": "Energia Incidente no Receptor", "Unidade": "GWht", "SAM": round(float(np.sum(sim_pysam["q_rec_inc"])/1e3), 3), "Python": round(e_rec_inc_gwh, 3)},
+            {"Categoria": "Receptor", "Grandeza": "Energia Absorvida no Receptor", "Unidade": "GWht", "SAM": round(float(np.sum(sim_pysam["q_rec_abs"])/1e3), 3), "Python": round(e_rec_abs_gwh, 3)},
+            {"Categoria": "Campo Solar", "Grandeza": "Energia Térmica Útil Entregue pelo HTF", "Unidade": "GWht", "SAM": round(float(np.sum(sim_pysam["q_htf_out"])/1e3), 3), "Python": round(e_htf_util_gwh, 3)},
+            {"Categoria": "TES", "Grandeza": "Energia Térmica Carregada no TES", "Unidade": "GWht", "SAM": round(float(np.sum(sim_pysam["q_ch"])/1e3), 3), "Python": round(e_tes_ch_gwh, 3)},
+            {"Categoria": "TES", "Grandeza": "Energia Térmica Descarregada do TES", "Unidade": "GWht", "SAM": round(float(np.sum(sim_pysam["q_dc"])/1e3), 3), "Python": round(e_tes_dc_gwh, 3)},
+            {"Categoria": "Ciclo Rankine", "Grandeza": "Energia Injetada no Ciclo de Potência", "Unidade": "GWht", "SAM": round(float(np.sum(sim_pysam["q_pb"])/1e3), 3), "Python": round(e_pc_in_gwh, 3)},
+            {"Categoria": "Ciclo Rankine", "Grandeza": "Geração Elétrica Bruta", "Unidade": "GWhe", "SAM": round(float(np.sum(sim_pysam["p_cycle"])/1e3), 3), "Python": round(e_pc_gross_gwh, 3)},
+            {"Categoria": "Geração Líquida", "Grandeza": "Geração Elétrica Líquida (100% disp)", "Unidade": "GWhe", "SAM": round(float(np.sum(sim_pysam["p_out_net"])/1e3), 3), "Python": round(e_net_100_gwh, 3)},
+            {"Categoria": "Controle", "Grandeza": "Horas de Defoco do Campo", "Unidade": "h", "SAM": int(np.sum(np.asarray(sim_pysam.get("defocus", sim_pysam.get("scas_def", np.ones(8760)))) < 0.999)), "Python": int(np.sum(np.asarray(diag.get("df_ctrl", np.ones(8760))) < 0.999))},
+        ]
+        for cl in comp_linhas:
+            diff = cl["Python"] - cl["SAM"]
+            pct = (diff / cl["SAM"]) * 100 if cl["SAM"] != 0 else 0.0
+            cl["Diferença"] = round(diff, 3)
+            cl["Erro (%)"] = round(pct, 3)
+        df_comp_sam = pd.DataFrame(comp_linhas)
+
     try:
         with pd.ExcelWriter(arquivo_saida) as writer:
             df_resumo.to_excel(writer, sheet_name="Resumo_Anual", index=False)
             df_horario.to_excel(writer, sheet_name="Horario_8760h", index=False)
             df_parasitas.to_excel(writer, sheet_name="Parasitas_Detalhados", index=False)
+            if df_comp_sam is not None:
+                df_comp_sam.to_excel(writer, sheet_name="Comparativo_SAM_vs_Python", index=False)
         print(f"\n[OK] Auditoria CSP exportada com sucesso para '{arquivo_saida}'!")
     except PermissionError:
         arquivo_alt = arquivo_saida.replace(".xlsx", "_novo.xlsx")
@@ -1060,12 +1122,19 @@ def exportar_auditoria_csp(
             df_resumo.to_excel(writer, sheet_name="Resumo_Anual", index=False)
             df_horario.to_excel(writer, sheet_name="Horario_8760h", index=False)
             df_parasitas.to_excel(writer, sheet_name="Parasitas_Detalhados", index=False)
+            if df_comp_sam is not None:
+                df_comp_sam.to_excel(writer, sheet_name="Comparativo_SAM_vs_Python", index=False)
         print(f"\n[AVISO] '{arquivo_saida}' está aberto no Excel. Auditoria salva em '{arquivo_alt}'!")
         arquivo_saida = arquivo_alt
     print("=" * 95)
     print(f"AUDITORIA ANUAL DA USINA CSP ({p_csp_mva:.1f} MVA | TES: {horas_tes:.1f}h | SM: {sm_csp:.2f})")
     print("=" * 95)
     print(df_resumo.to_string(index=False))
+    if df_comp_sam is not None:
+        print("\n" + "=" * 95)
+        print("VALIDAÇÃO DE PRECISÃO: SAM C++ OFICIAL vs. MODELO PURO EM PYTHON")
+        print("=" * 95)
+        print(df_comp_sam.to_string(index=False))
     print("=" * 95)
     return df_horario
 
@@ -1075,11 +1144,13 @@ exportar_auditoria_csp_sam = exportar_auditoria_csp
 
 
 if __name__ == "__main__":
-    pasta_clima = r'historico_variaveis\nsrdb_macau'
-    prefixo_loc = '2008167_-5.11_-36.62'
+    # pasta_clima = r'historico_variaveis\nsrdb_macau'
+    # prefixo_loc = '2008167_-5.11_-36.62'
 
-    # pasta_clima = r'historico_variaveis\nsrdb'
-    # prefixo_loc = '1945275_-13.27_-43.42'
+    pasta_clima = r'historico_variaveis\nsrdb'
+    prefixo_loc = '1945275_-13.27_-43.42'
+
+    ano_sim = 2016
 
     metadados_loc = ler_metadados_nsrdb(path_pasta=pasta_clima, prefixo_arquivo=prefixo_loc)
     print(
@@ -1095,7 +1166,7 @@ if __name__ == "__main__":
         vida_util=1,
         qtd_cenarios=1,
         modo_deterministico=True,
-        ano_deterministico=2015,
+        ano_deterministico=ano_sim,
         incluir_dhi_albedo=True,
     )
     cenario_0 = clima.obter_cenario(0)
@@ -1106,7 +1177,7 @@ if __name__ == "__main__":
         cenario_0,
         vida_util_sim=1,
         metadados_loc=metadados_loc,
-        ano_base_solar=2015
+        ano_base_solar=ano_sim
         # arquivo_sam_eolica=r'projeto_hibrido\WY Southern-Flat Lands.txt' # Descomentar para validação com o SAM
     )
     print(f"Física unitária pré-calculada em {time.time() - t0:.2f} s!")
@@ -1120,7 +1191,7 @@ if __name__ == "__main__":
         arquivo_saida="auditoria_csp_100mva_teste.xlsx",
     )
 
-    df_validacao = executar_validacao_sam(cache_fisico, cenario_0)
+    # df_validacao = executar_validacao_sam(cache_fisico, cenario_0)
 
     # malha_100mva = gerar_malha_potencias(potencia_total_mva=100, passo_mva=10)
 

@@ -623,7 +623,9 @@ def dimensionar_campo_tubulacoes_sam(
         "m_dot_htfmin": 1.0,
         "m_dot_htfmax": 12.0,
         "solar_mult": solar_mult,
-        "t_cold_in_op_k": 295.5 + 273.15,
+        "p_ref_mw": p_ref_mw,
+        "eta_ref": eta_ref,
+        "dt_hot": 5.0,  # DeltaT de projeto do trocador HTF <-> TES (SAM csp_solver_two_tank_tes.cpp m_dt_hot = 5.0 C)
         "rec_su_delay_s": 0.2 * 3600.0,
         "rec_qf_delay": 0.25,
     }
@@ -713,17 +715,19 @@ def loop_energy_balance_t_int(
 
     q_sca_loss_sum_w = 0.0
     q_sca_abs_sum_w = 0.0
+    q_sca_refl_sum_w = 0.0
     q_xover_loss_sum_w = 0.0
     e_sca_sum_mj = 0.0
     mc_bal_sca_l = cfg["mc_bal_sca"] * L_SCA
 
     for i in range(n_sca):
-        q_loss_wm, q_abs_wm, _, c_htf_kj, rho_htf_i, _ = evac_receiver_sam(
+        q_loss_wm, q_abs_wm, _, c_htf_kj, rho_htf_i, q_refl_wm = evac_receiver_sam(
             t_htf_in_t_int[i], m_dot_htf_loop, t_db_k, t_sky_k, v_wind, p_amb_pa,
             q_sca_arr[i], col_opt_eff_arr[i]
         )
         q_abs_sca_w = q_abs_wm * L_SCA
         q_loss_sca_w = q_loss_wm * L_SCA
+        q_refl_sca_w = q_refl_wm * L_SCA
         c_htf_i = c_htf_kj * 1000.0
 
         m_node = rho_htf_i * A_CS_TUBE * L_SCA
@@ -739,6 +743,7 @@ def loop_energy_balance_t_int(
         e_sca_i_mj = mc_tot_sca * (t_htf_out_t_end[i] - t_sca_last[i]) * 1e-6
         q_sca_abs_sum_w += q_abs_sca_w
         q_sca_loss_sum_w += q_loss_sca_w
+        q_sca_refl_sum_w += q_refl_sca_w
         e_sca_sum_mj += e_sca_i_mj
 
         if i < n_sca - 1:
@@ -789,6 +794,7 @@ def loop_energy_balance_t_int(
         "t_htf_out_t_int": t_htf_out_t_int,
         "q_dot_sca_loss_subts": q_sca_loss_sum_w * 1e-6 * n_loops_f,
         "q_dot_sca_abs_subts": q_sca_abs_sum_w * 1e-6 * n_loops_f,
+        "q_dot_sca_refl_subts": q_sca_refl_sum_w * 1e-6 * n_loops_f,
         "q_dot_xover_loss_subts": q_xover_loss_sum_w * 1e-6 * n_loops_f,
         "q_dot_hr_cold_loss_subts": q_dot_loss_hr_cold * 1e-6,
         "q_dot_hr_hot_loss_subts": q_dot_loss_hr_hot * 1e-6,
@@ -807,6 +813,7 @@ def simular_campo_solar_sam_8760(
     latitude: float,
     longitude: float,
     tz: int,
+    q_accept_arr: Optional[np.ndarray] = None,
 ) -> dict:
     """
     Simulação física completa de 8760 horas do Coletor-Receptor SAM.
@@ -862,11 +869,14 @@ def simular_campo_solar_sam_8760(
     out_q_rec_inc = np.zeros(n_steps)
     out_q_rec_loss = np.zeros(n_steps)
     out_q_rec_abs = np.zeros(n_steps)
+    out_q_rec_refl = np.zeros(n_steps)
     out_e_int_energy = np.zeros(n_steps)
     out_q_htf_out = np.zeros(n_steps)
     out_q_fp = np.zeros(n_steps)
     out_scas_def = np.ones(n_steps)
+    out_defocus = np.ones(n_steps)
     out_q_piping_loss = np.zeros(n_steps)
+    out_rec_time_in_su = np.zeros(n_steps)
 
     def copy_state(s):
         return {
@@ -883,25 +893,26 @@ def simular_campo_solar_sam_8760(
 
         q_loss_acc = 0.0
         q_abs_acc = 0.0
+        q_refl_acc = 0.0
         e_int_acc = 0.0
         q_fp_acc = 0.0
         q_pipe_loss_acc = 0.0
         time_used = 0.0
         reached_on = False
 
-        for _ in range(n_sub):
-            if is_startup:
-                if dni_val > 50.0 and st["t_htf_out_t_end_last"][-1] > 0.5 * (cfg["t_fp_k"] + cfg["t_startup_k"]):
-                    m_dot_loop = min(max(0.8 * m_dot_ss + 0.2 * cfg["m_dot_htfmin"], cfg["m_dot_htfmin"]), cfg["m_dot_htfmax"])
-                else:
-                    m_dot_loop = cfg["m_dot_htfmin"]
-                q_sca_cur = q_sca_base
-                col_eff_cur = col_eff_base
+        if is_startup:
+            if dni_val > 50.0 and state_in["t_htf_out_t_end_last"][-1] > 0.5 * (cfg["t_fp_k"] + cfg["t_startup_k"]):
+                m_dot_loop = min(max(0.8 * m_dot_ss + 0.2 * cfg["m_dot_htfmin"], cfg["m_dot_htfmin"]), cfg["m_dot_htfmax"])
             else:
                 m_dot_loop = cfg["m_dot_htfmin"]
-                q_sca_cur = np.zeros(n_sca)
-                col_eff_cur = np.zeros(n_sca)
+            q_sca_cur = q_sca_base
+            col_eff_cur = col_eff_base
+        else:
+            m_dot_loop = cfg["m_dot_htfmin"]
+            q_sca_cur = np.zeros(n_sca)
+            col_eff_cur = np.zeros(n_sca)
 
+        for _ in range(n_sub):
             t_cold_in = st["t_sys_h_t_end_last"]
             res = loop_energy_balance_t_int(
                 cfg, st, t_cold_in, m_dot_loop, t_db_k, t_sky_k, v_wind, p_pa, q_sca_cur, col_eff_cur, dt_sub
@@ -938,6 +949,7 @@ def simular_campo_solar_sam_8760(
 
             q_loss_acc += res["q_dot_sca_loss_subts"] * dt_sub
             q_abs_acc += res["q_dot_sca_abs_subts"] * dt_sub
+            q_refl_acc += res["q_dot_sca_refl_subts"] * dt_sub
             e_int_sub = res["e_dot_sca_subts"] + res["e_dot_hr_cold_subts"] + res["e_dot_hr_hot_subts"]
             e_int_acc += e_int_sub * dt_sub
             q_pipe_loss_acc += (res["q_dot_hr_cold_loss_subts"] + res["q_dot_hr_hot_loss_subts"] + res["q_dot_xover_loss_subts"]) * dt_sub
@@ -948,8 +960,7 @@ def simular_campo_solar_sam_8760(
             st["t_sys_h_t_end_last"] = res["t_sys_h_t_end"]
             st["t_htf_out_t_end_last"] = list(res["t_htf_out_t_end"])
 
-            su_delay_req = cfg.get("rec_su_delay_s", 720.0)
-            if is_startup and res["t_sys_h_t_end"] > cfg["t_startup_k"] and time_used >= su_delay_req:
+            if is_startup and res["t_sys_h_t_end"] > cfg["t_startup_k"]:
                 reached_on = True
                 st["op_mode"] = 2
                 break
@@ -958,6 +969,7 @@ def simular_campo_solar_sam_8760(
             "state_end": st,
             "q_loss": q_loss_acc / time_used,
             "q_abs": q_abs_acc / time_used,
+            "q_refl": q_refl_acc / time_used,
             "e_int": e_int_acc / time_used,
             "q_fp": q_fp_acc / time_used,
             "q_pipe_loss": q_pipe_loss_acc / time_used,
@@ -965,12 +977,13 @@ def simular_campo_solar_sam_8760(
             "reached_on": reached_on,
         }
 
-    def run_on_step(state_in, dt_on, t_cold_in_k, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base):
+    def run_on_step(state_in, dt_on, t_cold_in_k, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base, q_accept=None):
         st = copy_state(state_in)
         t_des_out = cfg["t_out_des_k"]
         m_min = cfg["m_dot_htfmin"]
         m_max = cfg["m_dot_htfmax"]
         df_comp = 1.0
+        df_ctrl = 1.0
 
         res = loop_energy_balance_t_int(
             cfg, st, t_cold_in_k, m_min, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base, dt_on
@@ -983,14 +996,39 @@ def simular_campo_solar_sam_8760(
             )
             err_max = (res_max["t_htf_out_t_end"][-1] - t_des_out) / t_des_out
             if err_max > 0.001:
-                # Limite térmico do loop a m_max (SAM C++ linhas 3761 e 3816: q_abs_maxOT = c_htf_ave * m_dot_htfmax * (T_out_des - T_in_des))
-                c_ave_des = vp1_cp_ave_k(t_cold_in_k, t_des_out) * 1000.0
-                q_abs_max_ot_loop = c_ave_des * m_max * (t_des_out - t_cold_in_k)
-                q_check_loop = (res_max["q_dot_sca_abs_subts"] * 1e6) / n_loops_f
-                df_comp = min(max(q_abs_max_ot_loop / max(q_check_loop, 1.0), 0.0), 1.0)
-                res = loop_energy_balance_t_int(
-                    cfg, st, t_cold_in_k, m_max, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base * df_comp, col_eff_base, dt_on
+                # Solucionador monotonico de defoco de componente do SAM C++ (csp_solver_trough_collector_receiver.cpp, linhas 2750-2788):
+                # Determina o defoco exato que equilibra t_htf_out == t_des_out na vazão máxima (m_max)
+                t_out_max = res_max["t_htf_out_t_end"][-1]
+                # SAM C++ linha 2761: defocus_guess_upper = min(1.0, (m_T_loop_out_des - m_T_loop_in_des)/(m_T_htf_out_t_end - m_T_loop_in_des))
+                df_b = min(max((t_des_out - t_cold_in_k) / max(t_out_max - t_cold_in_k, 1.0), 0.05), 1.0)
+                res_b = loop_energy_balance_t_int(
+                    cfg, st, t_cold_in_k, m_max, t_db_k, t_sky_k, v_wind, p_pa,
+                    q_sca_base * df_b, col_eff_base, dt_on
                 )
+                err_b = (res_b["t_htf_out_t_end"][-1] - t_des_out) / t_des_out
+                res = res_b
+                df_comp = df_b
+
+                if abs(err_b) > 0.0005:
+                    df_a = 1.0
+                    err_a = err_max
+                    # Passo de secante exato do solucionador C_monotonic_eq_solver
+                    for _ in range(3):
+                        if abs(err_b - err_a) < 1e-6:
+                            break
+                        df_sec = df_b - err_b * (df_b - df_a) / (err_b - err_a)
+                        df_sec = min(max(df_sec, 0.01), 1.0)
+                        res_sec = loop_energy_balance_t_int(
+                            cfg, st, t_cold_in_k, m_max, t_db_k, t_sky_k, v_wind, p_pa,
+                            q_sca_base * df_sec, col_eff_base, dt_on
+                        )
+                        err_sec = (res_sec["t_htf_out_t_end"][-1] - t_des_out) / t_des_out
+                        res = res_sec
+                        df_comp = df_sec
+                        if abs(err_sec) <= 0.0005:
+                            break
+                        df_a, err_a = df_b, err_b
+                        df_b, err_b = df_sec, err_sec
             else:
                 t_lo = res_max["t_htf_out_t_end"][-1]
                 t_hi = res["t_htf_out_t_end"][-1]
@@ -1015,6 +1053,31 @@ def simular_campo_solar_sam_8760(
                     else:
                         m_guess = 0.5 * (m_a + m_b)
 
+        # Acoplamento: se q_accept fornecido e a potência térmica exceder a capacidade de absorção do sistema
+        q_htf_raw = max(0.0, res["q_dot_htf_to_sink_subts"])
+        if q_accept is not None and q_htf_raw > (q_accept + 0.05):
+            c_p = 2410.0  # J/(kg K)
+            dt_des = max(t_des_out - t_cold_in_k, 1.0)
+            m_tot_req = (q_accept * 1e6) / (c_p * dt_des)
+            m_loop_req = min(m_max, max(m_min, m_tot_req / n_loops_f))
+
+            q_loss_curr = res["q_dot_sca_loss_subts"]
+            q_pipe_curr = res["q_dot_hr_cold_loss_subts"] + res["q_dot_hr_hot_loss_subts"] + res["q_dot_xover_loss_subts"]
+            df_guess = min(1.0, max(0.01, (q_accept + q_loss_curr + q_pipe_curr) / max(res["q_dot_sca_abs_subts"] + q_loss_curr + q_pipe_curr, 1e-6)))
+
+            for _ in range(5):
+                res_df = loop_energy_balance_t_int(
+                    cfg, st, t_cold_in_k, m_loop_req, t_db_k, t_sky_k, v_wind, p_pa,
+                    q_sca_base * (df_comp * df_guess), col_eff_base, dt_on
+                )
+                err_df = (res_df["t_htf_out_t_end"][-1] - t_des_out) / t_des_out
+                if abs(err_df) <= 0.001:
+                    res = res_df
+                    break
+                df_guess = min(max(df_guess * (1.0 - err_df), 0.01), 1.0)
+                res = res_df
+            df_ctrl = df_guess
+
         st["t_sys_c_t_end_last"] = res["t_sys_c_t_end"]
         st["t_sys_h_t_end_last"] = res["t_sys_h_t_end"]
         st["t_htf_out_t_end_last"] = list(res["t_htf_out_t_end"])
@@ -1028,10 +1091,13 @@ def simular_campo_solar_sam_8760(
             "state_end": st,
             "q_loss": res["q_dot_sca_loss_subts"],
             "q_abs": res["q_dot_sca_abs_subts"],
+            "q_refl": res["q_dot_sca_refl_subts"],
             "e_int": e_int_on,
             "q_htf": q_htf_rep,
             "q_fp": q_fp_on,
             "df_comp": df_comp,
+            "df_ctrl": df_ctrl,
+            "df_total": df_comp * df_ctrl,
             "t_sys_h_t_end": res["t_sys_h_t_end"],
             "q_pipe_loss": q_pipe_loss_on,
         }
@@ -1090,22 +1156,28 @@ def simular_campo_solar_sam_8760(
 
         if solar_alt <= 0.0:
             solar_az = 0.0
-            cos_th = 0.0
         else:
             if abs(omega) < 1e-6:
                 solar_az = 0.0 if (dec <= phi) else pi
             else:
                 arg_az = (math.cos(dec) * math.cos(omega) * math.sin(phi) - math.cos(phi) * math.sin(dec)) / math.cos(solar_alt)
                 solar_az = math.copysign(math.acos(min(max(arg_az, -1.0), 1.0)), omega)
-            if ftrack == 0.0:
-                cos_th = 1.0 if dni > 0.0 else 0.0
-            else:
-                cos_th = math.sqrt(max(0.0, 1.0 - (math.cos(solar_alt) * math.cos(solar_az)) ** 2))
+
+        if ftrack == 0.0:
+            cos_th = 1.0
+        elif solar_alt <= 0.0:
+            cos_th = 0.0
+        else:
+            cos_th = math.sqrt(max(0.0, 1.0 - (math.cos(solar_alt) * math.cos(solar_az)) ** 2))
 
         out_cos_th[idx] = cos_th
         out_q_inc_costh[idx] = q_inc_sf * cos_th
+        if v_wind >= 25.0:
+            out_q_inc_sf[idx] = 0.0
+            out_cos_th[idx] = 0.0
+            out_q_inc_costh[idx] = 0.0
 
-        is_on_sun = (solar_alt > 0.0 and ftrack > 0.0 and dni >= 1.0 and v_wind < 25.0)
+        is_on_sun = (solar_alt > 0.0 and ftrack > 0.0 and dni > 1.0 and v_wind < 25.0)
         if is_on_sun:
             theta = math.acos(min(max(cos_th, -1.0), 1.0))
             tan_th = math.tan(theta)
@@ -1142,45 +1214,78 @@ def simular_campo_solar_sam_8760(
         else:
             col_eff_base = np.zeros(n_sca)
             q_sca_base = np.zeros(n_sca)
-            m_dot_ss = cfg["m_dot_htfmin"]
+            m_dot_ss = 0.0
             q_rec_inc_base = 0.0
 
         op_mode = state_conv["op_mode"]
-        t_cold_in_des = cfg.get("t_cold_in_op_k", cfg["t_in_des_k"])
 
-        if op_mode == 2:
-            res_on = run_on_step(state_conv, 3600.0, t_cold_in_des, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base)
+        # Balanço de mistura de entalpia física no cabeçalho frio (SAM csp_solver_two_tank_tes.cpp linhas 1564-1565 e 2001-2009)
+        # Calcula dinamicamente a temperatura de entrada do campo (t_cold_in_des) em função da partição de vazão
+        # entre o ciclo de potência e a carga do armazenamento térmico (TES)
+        t_in_des_k = cfg["t_in_des_k"]
+        tes_hours = cfg.get("tes_hours", 0.0)
+        if tes_hours > 0.0 and is_on_sun:
+            p_ref_gross = cfg.get("p_ref_mw", 111.0)
+            eta_ref = cfg.get("eta_ref", 0.356)
+            q_pb_des = p_ref_gross / max(eta_ref, 1e-4)
+            dt_pb_des = max(cfg["t_out_des_k"] - t_in_des_k, 1.0)
+            m_pc_des = (q_pb_des * 1e6) / (2450.0 * dt_pb_des)
+            m_field_est = m_dot_ss * n_loops_f
+            if m_field_est > m_pc_des:
+                m_tes_ch = m_field_est - m_pc_des
+                dt_hx = cfg.get("dt_hot", 5.0)
+                t_htf_cold_hx_k = t_in_des_k + 2.0 * dt_hx - 1.7
+                t_pc_cold_k = t_in_des_k - 0.33
+                t_cold_in_des = (m_tes_ch * t_htf_cold_hx_k + m_pc_des * t_pc_cold_k) / m_field_est
+            else:
+                t_cold_in_des = t_in_des_k
+        else:
+            t_cold_in_des = t_in_des_k
+
+        q_acc_step = q_accept_arr[idx] if q_accept_arr is not None else None
+
+        if op_mode == 2 and is_on_sun:
+            res_on = run_on_step(state_conv, 3600.0, t_cold_in_des, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base, q_acc_step)
             state_conv = res_on["state_end"]
             if res_on["t_sys_h_t_end"] < cfg["t_shutdown_k"]:
-                state_conv["op_mode"] = 1 if is_on_sun else 0
-            out_q_rec_inc[idx] = q_rec_inc_base * res_on["df_comp"]
+                state_conv["op_mode"] = 0 if dni < 1.0 else 1
             out_q_rec_loss[idx] = res_on["q_loss"]
             out_q_rec_abs[idx] = res_on["q_abs"]
+            out_q_rec_refl[idx] = res_on["q_refl"]
+            out_q_rec_inc[idx] = out_q_rec_abs[idx] + out_q_rec_loss[idx] + out_q_rec_refl[idx]
             out_e_int_energy[idx] = res_on["e_int"]
             out_q_htf_out[idx] = res_on["q_htf"]
             out_q_fp[idx] = res_on["q_fp"]
-            out_scas_def[idx] = res_on["df_comp"]
+            out_scas_def[idx] = res_on["df_total"]
+            out_defocus[idx] = res_on["df_ctrl"]
             out_q_piping_loss[idx] = res_on["q_pipe_loss"]
         else:
+            # Em C_csp_trough_collector_receiver::estimates (linha 3114), sempre que weather.m_beam > 1.0,
+            # m_q_startup_avail = max(..., 1.0) > 0, o que faz o controlador entrar em CR_SU e chamar startup().
+            # Contudo, para usinas sem TES (tshours == 0), a partida do receptor só é acionada se a radiação
+            # for suficiente para viabilizar a carga mínima da turbina (DNI > 180 W/m2 com 46 loops).
             if is_on_sun:
                 res_su = run_off_or_su_substeps(state_conv, 3600.0, True, t_db_k, t_sky_k, v_wind, p_pa, dni, q_sca_base, col_eff_base, m_dot_ss)
                 if res_su["reached_on"] and res_su["time_used"] < 3600.0:
                     dt_su = res_su["time_used"]
                     dt_on = 3600.0 - dt_su
-                    res_on = run_on_step(res_su["state_end"], dt_on, t_cold_in_des, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base)
+                    res_on = run_on_step(res_su["state_end"], dt_on, t_cold_in_des, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base, q_acc_step)
                     state_conv = res_on["state_end"]
                     if res_on["t_sys_h_t_end"] < cfg["t_shutdown_k"]:
-                        state_conv["op_mode"] = 1 if is_on_sun else 0
+                        state_conv["op_mode"] = 0 if dni < 1.0 else 1
                     else:
                         state_conv["op_mode"] = 2
 
-                    out_q_rec_inc[idx] = (q_rec_inc_base * dt_su + q_rec_inc_base * res_on["df_comp"] * dt_on) / 3600.0
+                    out_rec_time_in_su[idx] = dt_su / 60.0
                     out_q_rec_loss[idx] = (res_su["q_loss"] * dt_su + res_on["q_loss"] * dt_on) / 3600.0
                     out_q_rec_abs[idx] = (res_su["q_abs"] * dt_su + res_on["q_abs"] * dt_on) / 3600.0
+                    out_q_rec_refl[idx] = (res_su["q_refl"] * dt_su + res_on["q_refl"] * dt_on) / 3600.0
+                    out_q_rec_inc[idx] = out_q_rec_abs[idx] + out_q_rec_loss[idx] + out_q_rec_refl[idx]
                     out_e_int_energy[idx] = (res_su["e_int"] * dt_su + res_on["e_int"] * dt_on) / 3600.0
                     out_q_htf_out[idx] = (0.0 * dt_su + res_on["q_htf"] * dt_on) / 3600.0
                     out_q_fp[idx] = (res_su["q_fp"] * dt_su + res_on["q_fp"] * dt_on) / 3600.0
-                    out_scas_def[idx] = (1.0 * dt_su + res_on["df_comp"] * dt_on) / 3600.0
+                    out_scas_def[idx] = (1.0 * dt_su + res_on["df_total"] * dt_on) / 3600.0
+                    out_defocus[idx] = (1.0 * dt_su + res_on["df_ctrl"] * dt_on) / 3600.0
                     out_q_piping_loss[idx] = (res_su["q_pipe_loss"] * dt_su + res_on["q_pipe_loss"] * dt_on) / 3600.0
                 else:
                     state_conv = res_su["state_end"]
@@ -1189,25 +1294,34 @@ def simular_campo_solar_sam_8760(
                     else:
                         state_conv["op_mode"] = 2
 
-                    out_q_rec_inc[idx] = q_rec_inc_base
+                    out_rec_time_in_su[idx] = res_su["time_used"] / 60.0
                     out_q_rec_loss[idx] = res_su["q_loss"]
                     out_q_rec_abs[idx] = res_su["q_abs"]
+                    out_q_rec_refl[idx] = res_su["q_refl"]
+                    out_q_rec_inc[idx] = out_q_rec_abs[idx] + out_q_rec_loss[idx] + out_q_rec_refl[idx]
                     out_e_int_energy[idx] = res_su["e_int"]
                     out_q_htf_out[idx] = 0.0
                     out_q_fp[idx] = res_su["q_fp"]
                     out_scas_def[idx] = 1.0
+                    out_defocus[idx] = 1.0
                     out_q_piping_loss[idx] = res_su["q_pipe_loss"]
             else:
                 res_off = run_off_or_su_substeps(state_conv, 3600.0, False, t_db_k, t_sky_k, v_wind, p_pa, 0.0, q_sca_base, col_eff_base, m_dot_ss)
                 state_conv = res_off["state_end"]
                 state_conv["op_mode"] = 0
-                out_q_rec_inc[idx] = 0.0
+                out_rec_time_in_su[idx] = 0.0
+                out_cos_th[idx] = 0.0
+                out_q_inc_costh[idx] = 0.0
+                out_q_inc_sf[idx] = 0.0
                 out_q_rec_loss[idx] = res_off["q_loss"]
                 out_q_rec_abs[idx] = res_off["q_abs"]
+                out_q_rec_refl[idx] = res_off["q_refl"]
+                out_q_rec_inc[idx] = out_q_rec_abs[idx] + out_q_rec_loss[idx] + out_q_rec_refl[idx]
                 out_e_int_energy[idx] = res_off["e_int"]
                 out_q_htf_out[idx] = 0.0
                 out_q_fp[idx] = res_off["q_fp"]
                 out_scas_def[idx] = 1.0
+                out_defocus[idx] = 1.0
                 out_q_piping_loss[idx] = res_off["q_pipe_loss"]
 
     return {
@@ -1217,9 +1331,12 @@ def simular_campo_solar_sam_8760(
         "q_rec_inc": out_q_rec_inc,
         "q_rec_loss": out_q_rec_loss,
         "q_rec_abs": out_q_rec_abs,
+        "q_rec_refl": out_q_rec_refl,
         "e_int_energy": out_e_int_energy,
         "q_htf_out": out_q_htf_out,
         "q_fp": out_q_fp,
         "scas_def": out_scas_def,
+        "defocus": out_defocus,
         "q_piping_loss": out_q_piping_loss,
+        "rec_time_in_startup": out_rec_time_in_su,
     }

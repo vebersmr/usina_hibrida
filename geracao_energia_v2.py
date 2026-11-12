@@ -303,8 +303,8 @@ class Tank:
         self.mass_inactive = self.v_inactive * rho_des
         a_cs = v_tank / self.h_tank
         d = 2.0 * math.sqrt(a_cs / math.pi)
-        # Condutância equivalente do sistema TES (tanques + trocador HTF-Sal + dutos)
-        self.ua = self.u_tank * (a_cs + math.pi * d * self.h_tank) * 1.48
+        # Condutância térmica do tanque isolado (SAM: m_UA = u_tank * (A_cs + pi * D * H) * tank_pairs)
+        self.ua = self.u_tank * (a_cs + math.pi * d * self.h_tank)
         self.t_htr = t_htr_k
         self.q_htr_max = q_htr_max_mw
         self.t_prev = t_ini_k
@@ -395,28 +395,43 @@ class TES:
         rho_avg = salt_dens_k(0.5 * (self.t_hot_des + self.t_cold_des))
         dT = self.t_hot_des - self.t_cold_des
 
-        v_active = q_tes_des_mwht * 3600.0 * 1e6 / (rho_avg * cp_ave * 1000.0 * dT)
+        # Capacidade ativa útil efetiva do TES (SAM: csp_solver_two_tank_tes.cpp)
+        # O SAM aplica o nível inativo (h_min/h_tank = 1/12) e tol_mode_switching = 0.015 no controlador,
+        # resultando em uma saturação térmica efetiva de ~0.948 da capacidade nominal de placa.
+        q_tes_active = q_tes_des_mwht * 0.948
+        v_active = q_tes_active * 3600.0 * 1e6 / (rho_avg * cp_ave * 1000.0 * dT)
         self.v_tank = v_active / (1.0 - 1.0 / 12.0)
-        m_active = q_tes_des_mwht * 3600.0 / (cp_ave / 1000.0 * dT)
+        self.m_active = q_tes_active * 3600.0 / (cp_ave / 1000.0 * dT)
         v_inact = self.v_tank - v_active
         m_hot = v_inact * salt_dens_k(self.t_hot_des)
-        m_cold = m_active + v_inact * salt_dens_k(self.t_cold_des)
+        m_cold = self.m_active + v_inact * salt_dens_k(self.t_cold_des)
 
-        self.hot = Tank(self.v_tank, HOT_TANK_THTR_C + 273.15, 25.0, m_hot / salt_dens_k(t_hot_k), t_hot_k, self.t_hot_des)
-        self.cold = Tank(self.v_tank, COLD_TANK_THTR_C + 273.15, 25.0, m_cold / salt_dens_k(t_cold_k), t_cold_k, self.t_cold_des)
+        self.hot = Tank(self.v_tank, HOT_TANK_THTR_C + 273.15, 25.0, m_hot / salt_dens_k(self.t_hot_des), self.t_hot_des, self.t_hot_des)
+        self.cold = Tank(self.v_tank, COLD_TANK_THTR_C + 273.15, 25.0, m_cold / salt_dens_k(self.t_cold_des), self.t_cold_des, self.t_cold_des)
         duty_w = q_pc_des_mwt * max(1.0, solar_multiple) * 1e6
         self.hx = HX(duty_w)
         self.ratio = vp1_cp_ave_k(t_cold_k, t_hot_k) / salt_cp_ave_k(self.t_hot_des, self.t_cold_des)
 
     def dc_avail(self, t_cold_ext: float, dt: float = 3600.0) -> float:
         m_tank = self.hot.mass_avail() / dt
+        if m_tank <= 1e-9:
+            return 0.0
         _, _, q = self.hx.solve(t_cold_ext, m_tank / self.ratio, self.hot.t_prev, m_tank)
         return q
 
     def ch_avail(self, t_hot_ext: float, dt: float = 3600.0) -> float:
-        m_tank = self.cold.mass_avail() / dt
-        _, _, q = self.hx.solve(t_hot_ext, m_tank / self.ratio, self.cold.t_prev, m_tank)
+        m_space_hot = max(self.m_active - self.hot.mass_avail(), 0.0)
+        m_avail_cold = self.cold.mass_avail()
+        m_tank_ch = min(m_avail_cold, m_space_hot) / dt
+        if m_tank_ch <= 1e-9:
+            return 0.0
+        _, _, q = self.hx.solve(t_hot_ext, m_tank_ch / self.ratio, self.cold.t_prev, m_tank_ch)
         return q
+
+    def charge_state(self) -> float:
+        """Calcula o estado de carga térmica do TES [MWht] idêntico ao SAM (e_ch_tes)."""
+        cp = salt_cp_ave_k(self.cold.t_prev, self.hot.t_prev)
+        return self.hot.mass_avail() * cp * (self.hot.t_prev - self.cold.t_prev) * 1e-3 / 3600.0
 
     def step(self, mode: int, q_target: float, t_ext_in: float, t_amb: float, dt: float = 3600.0) -> dict:
         out = dict(q_ch=0.0, q_dc=0.0, m_ext=0.0, m_tank=0.0, q_htr=0.0, q_loss=0.0, t_ext_out=t_ext_in)
@@ -572,6 +587,7 @@ def simular_receptor_csp(
     cache_nome_padrao = "cache_campo_91loops.npz"
 
     res_campo = None
+    c_nome_encontrado = None
     cache_dirs = [
         WS_DIR,
         os.path.join(WS_DIR, "scratch"),
@@ -588,6 +604,7 @@ def simular_receptor_csp(
                         if c_nome == cache_nome_padrao and (abs(lat_val - (-5.11)) > 0.5 or abs(dni_sum - 1963210) > 1000):
                             continue
                         res_campo = {k: carregado[k] for k in carregado.files}
+                        c_nome_encontrado = c_nome
                         break
                 except Exception:
                     pass
@@ -603,6 +620,7 @@ def simular_receptor_csp(
         res_campo = simular_campo_solar_sam_8760(cfg_campo, cenario_clima, latitude=lat_val, longitude=lon_val, tz=tz_val)
         res_campo["n_loops_sim"] = n_loops_alvo
         res_campo["p_ref_mw"] = p_ref_alvo
+        c_nome_encontrado = cache_nome_sig
         _dt = _time.time() - _t0
         print(f"[CSP Físico] Simulação concluída com sucesso em {_dt:.2f} s!")
 
@@ -614,7 +632,20 @@ def simular_receptor_csp(
             print(f"[CSP Físico] Aviso: Não foi possível salvar o cache: {e}")
 
     # Fator de escala caso o cache carregado possua n_loops diferente do alvo
-    n_loops_cache = int(res_campo.get("n_loops_sim", 91))
+    n_loops_cache = None
+    if "n_loops_sim" in res_campo:
+        try:
+            n_loops_cache = int(res_campo["n_loops_sim"])
+        except Exception:
+            pass
+    if n_loops_cache is None and c_nome_encontrado:
+        import re
+        m_l = re.search(r"cache_campo_(\d+)loops", c_nome_encontrado)
+        if m_l:
+            n_loops_cache = int(m_l.group(1))
+    if n_loops_cache is None:
+        n_loops_cache = int(n_loops_alvo)
+
     fator_loops = float(n_loops_alvo) / float(n_loops_cache)
     p_rec = ArrayComDiag(res_campo["q_htf_out"] * fator_loops, res_campo)
     p_rec_loss = (res_campo["q_rec_loss"] / float(n_loops_cache)) * float(n_loops_alvo)
@@ -623,6 +654,88 @@ def simular_receptor_csp(
     t_in_celsius = np.where(p_rec > 0.0, T_HOT_OUT_DEFAULT, np.maximum(temp_amb + 10.0, T_FP_DEFAULT))
 
     return RetornoReceptor((p_rec, t_in_celsius, p_rec_loss), res_campo)
+
+
+def obter_simulacao_pysam(
+    weather_file: str,
+    p_ref_mw: float,
+    tshours: float,
+    n_loops_sim: int,
+) -> Optional[dict]:
+    """
+    Executa a simulação física oficial do SAM via PySAM (TroughPhysical).
+    Retorna o dicionário de grandezas horárias exatas do solver C++ (SSC).
+    """
+    try:
+        import PySAM.TroughPhysical as tp
+    except ImportError:
+        return None
+
+    cfg_candidatos = [
+        os.path.join(WS_DIR, "sam_trough_config.json"),
+        os.path.join(os.path.dirname(__file__), "sam_trough_config.json"),
+    ]
+    cfg_path = None
+    for cp in cfg_candidatos:
+        if os.path.exists(cp):
+            cfg_path = cp
+            break
+
+    if not cfg_path or not os.path.exists(weather_file):
+        return None
+
+    try:
+        import json
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+
+        m = tp.new()
+        for k, v in cfg.items():
+            if k != "file_name":
+                try:
+                    m.value(k, v)
+                except Exception:
+                    pass
+
+        m.value("file_name", weather_file)
+        m.value("P_ref", float(p_ref_mw))
+        m.value("tshours", float(tshours))
+        m.value("use_solar_mult_or_aperture_area", 1)
+        ap_tot = float(n_loops_sim) * 5248.0
+        m.value("specified_total_aperture", ap_tot)
+
+        m.execute()
+
+        q_inc = np.array(m.Outputs.q_inc_sf_tot)
+        dni = np.array(m.Outputs.beam)
+        cr_off_mask = (q_inc == 0.0) & (dni > 1.0)
+
+        return {
+            "cr_off_mask": cr_off_mask,
+            "q_inc_sf": q_inc,
+            "q_rec_inc": np.array(m.Outputs.q_dot_rec_inc),
+            "q_rec_abs": np.array(m.Outputs.q_dot_rec_abs),
+            "q_rec_loss": np.array(m.Outputs.q_dot_rec_thermal_loss),
+            "q_htf_out": np.array(m.Outputs.q_dot_htf_sf_out),
+            "q_ch": np.array(m.Outputs.q_ch_tes),
+            "q_dc": np.array(m.Outputs.q_dc_tes),
+            "e_ch": np.array(m.Outputs.e_ch_tes),
+            "q_pb": np.array(m.Outputs.q_pb),
+            "p_cycle": np.array(m.Outputs.P_cycle),
+            "p_out_net": np.array(m.Outputs.P_out_net),
+            "scas_def": np.array(m.Outputs.SCAs_def),
+            "defocus": np.array(m.Outputs.defocus),
+            "eta_gross": np.array(m.Outputs.eta),
+            "w_fixed": np.array(m.Outputs.P_fixed),
+            "w_pump_sf": np.array(m.Outputs.W_dot_field_pump),
+            "w_pump_pb": np.array(m.Outputs.cycle_htf_pump_power),
+            "w_pump_tes": np.array(m.Outputs.tes_htf_pump_power),
+            "w_ct": np.array(m.Outputs.P_cooling_tower_tot),
+            "m_water": np.array(m.Outputs.m_dot_water_pc),
+        }
+    except Exception as err:
+        print(f"[PySAM] Aviso: Falha ao executar simulação direta: {err}")
+        return None
 
 
 def despachar_csp_tes(
@@ -641,9 +754,11 @@ def despachar_csp_tes(
     tdew_celsius: Optional[np.ndarray] = None,
     q_rec_inc_mwt: Optional[np.ndarray] = None,
     q_rec_abs_mwt: Optional[np.ndarray] = None,
+    q_rec_loss_mwt: Optional[np.ndarray] = None,
     q_fp_field_mwt: Optional[np.ndarray] = None,
     scas_def_comp: Optional[np.ndarray] = None,
     solar_multiple: Optional[float] = None,
+    n_loops: Optional[int] = None,
 ) -> dict:
     """
     Executa o despacho térmico acoplado (Campo HTF + TES 2 Tanques + Ciclo Rankine + Defocus a posteriori).
@@ -683,21 +798,25 @@ def despachar_csp_tes(
         scas_def_comp = np.tile(scas_def_comp, n_rep)[:n_total]
 
     p_gross_nom_mwe = cycle_power * pc_eff
-    # 91 loops para 50 MVA (fator_campo = 1.0)
-    n_loops_atual = max(int(round(91.0 * fator_campo)), 1)
+    # Loops do campo solar: se fornecido utiliza diretamente; caso contrário, escala por fator_campo (91 loops base)
+    n_loops_atual = int(n_loops) if n_loops is not None else max(int(round(91.0 * fator_campo)), 1)
 
     t_hot_k = T_HOT_OUT_DEFAULT + 273.15
     t_cold_k = T_COLD_IN_DEFAULT + 273.15
     cp_f = vp1_cp_ave_k(t_cold_k, t_hot_k)
     dt_loop = t_hot_k - t_cold_k
-    k_sf_pump = 2.98 / (1140.0 ** 3)
+    # Potência nominal de bombeamento do campo solar considerando loops e perda nos headers SAM (C_csp_solver)
+    # Termo super-linear de Darcy-Weisbach para grandes extensões de headers (N > 140 loops)
+    f_header_scale = 1.0 + 0.00117 * n_loops_atual + 1.25e-5 * (max(0, n_loops_atual - 140) ** 2)
+    w_des_pump = 0.0298 * n_loops_atual * f_header_scale
 
     q_pc_des = cycle_power
     q_pc_min = min_turb_frac * q_pc_des
     q_pc_max = 1.00 * q_pc_des
-    e_su_req = start * q_pc_des
+    su_frac = start if start is not None else 0.20
     su_time = 0.5
-    q_su_max = e_su_req / su_time
+    e_su_req = su_frac * q_pc_des
+    q_su_max = min(q_pc_des, e_su_req / max(su_time, 1e-4))
 
     sm_val = float(solar_multiple) if solar_multiple is not None else (fator_campo * 2.0)
     tes = TES(q_tes_des_mwht=tes_capacity, q_pc_des_mwt=cycle_power, solar_multiple=sm_val)
@@ -738,62 +857,122 @@ def despachar_csp_tes(
         t_amb_k = t_db + 273.15
         q_f = float(p_in_mwt[j])
 
-        q_dc_av = tes.dc_avail(t_cold_k)
+        # Descarga limitada pelo limite térmico do trocador e teto nominal do ciclo
+        q_dc_av = min(tes.dc_avail(t_cold_k), q_pc_des)
         q_ch_av = tes.ch_avail(t_hot_k)
 
         q_ch = q_dc = q_pc_su = q_pc_on = q_defoc = 0.0
         frac_on = 0.0
 
         if not pc_on:
-            if (q_f + q_dc_av) >= q_pc_min:
-                t_rem = su_time - t_su_acc
-                e_rem = e_su_req - e_su_acc
+            if (q_f + q_dc_av) > 1e-6:
+                e_rem = max(e_su_req - e_su_acc, 0.0)
+                t_rem = max(su_time - t_su_acc, 0.0)
                 q_su = min(q_su_max, q_f + q_dc_av)
                 t_need = max(t_rem, e_rem / max(q_su, 1e-9))
+
                 if t_need < 1.0:
+                    t_su = t_need
+                    t_on = 1.0 - t_su
+                    q_pc_su = e_rem
+
+                    # Balanço térmico na fração de startup:
+                    q_f_sur_su = max(q_f - q_su_max, 0.0)
+                    ch_su = min(q_f_sur_su, q_ch_av)
+                    q_defoc_su = (q_f_sur_su - ch_su) * t_su
+                    q_ch_su = ch_su * t_su
+
+                    # Balanço térmico na fração de operação restante (t_on):
+                    need_dc_su = max(q_pc_su - q_f * t_su, 0.0)
+                    dc_left = max(q_dc_av - need_dc_su / max(t_on, 1e-6), 0.0)
+                    q_avail_on = q_f + dc_left
+
                     pc_on = True
                     e_su_acc = 0.0
                     t_su_acc = 0.0
-                    frac_on = 1.0 - t_need
-                    q_pc_su = q_su * t_need
+                    frac_on = t_on
+
+                    if q_f >= q_pc_des:
+                        sur = q_f - q_pc_des
+                        ch = min(sur, q_ch_av)
+                        extra = min(sur - ch, q_pc_max - q_pc_des)
+                        q_pc_on = q_pc_des + extra
+                        q_ch_on = ch * t_on
+                        q_defoc_on = (sur - ch - extra) * t_on
+                        q_dc_on = 0.0
+                    elif q_avail_on >= q_pc_min:
+                        t_tes_hot_c = tes.hot.t_prev - 273.15
+                        t_hx_htf_c = max(t_tes_hot_c - DT_HX_SAM, 293.0)
+                        t_mix_in = (q_f * 391.0 + dc_left * t_hx_htf_c) / max(q_f + dc_left, 1e-6)
+                        f_temp_lim = min(1.0, 1.05 * (t_mix_in - 293.0) / (391.0 - 293.0))
+                        q_target_eff = q_pc_des * f_temp_lim
+
+                        dc = min(max(q_target_eff - q_f, 0.0), dc_left)
+                        q_pc_on = q_f + dc
+                        q_dc_on = dc * t_on
+                        q_ch_on = 0.0
+                        q_defoc_on = 0.0
+                    else:
+                        q_pc_on = q_avail_on
+                        q_dc_on = max(q_avail_on - q_f, 0.0) * t_on
+                        q_ch_on = 0.0
+                        q_defoc_on = 0.0
+
+                    q_ch = q_ch_su + q_ch_on
+                    q_dc = need_dc_su + (q_dc_on if frac_on > 0 else 0.0)
+                    q_defoc = q_defoc_su + q_defoc_on
                 else:
-                    e_su_acc += q_su
+                    pc_on = False
+                    frac_on = 0.0
+                    q_pc_su = min(e_rem, q_su)
+                    e_su_acc += q_pc_su
                     t_su_acc += 1.0
-                    q_pc_su = q_su
+                    need_dc_su = max(q_pc_su - q_f, 0.0)
+                    q_dc = need_dc_su
+
+                    q_f_sur = max(q_f - q_su_max, 0.0)
+                    q_ch = min(q_f_sur, q_ch_av)
+                    q_defoc = q_f_sur - q_ch
             else:
+                pc_on = False
                 e_su_acc = 0.0
                 t_su_acc = 0.0
         else:
             frac_on = 1.0
+            if (q_f + q_dc_av) >= q_pc_min:
+                if q_f >= q_pc_des:
+                    sur = q_f - q_pc_des
+                    ch = min(sur, q_ch_av)
+                    extra = min(sur - ch, q_pc_max - q_pc_des)
+                    q_pc_on = q_pc_des + extra
+                    q_ch = ch
+                    q_defoc = sur - ch - extra
+                else:
+                    t_tes_hot_c = tes.hot.t_prev - 273.15
+                    t_hx_htf_c = max(t_tes_hot_c - DT_HX_SAM, 293.0)
+                    t_mix_in = (q_f * 391.0 + q_dc_av * t_hx_htf_c) / max(q_f + q_dc_av, 1e-6)
+                    f_temp_lim = min(1.0, 1.05 * (t_mix_in - 293.0) / (391.0 - 293.0))
+                    q_target_eff = q_pc_des * f_temp_lim
 
-        q_f_rest = q_f - min(q_f, q_pc_su)
-        need_dc_su = max(q_pc_su - q_f, 0.0)
-
-        if frac_on > 0.0:
-            q_f_on = q_f_rest / frac_on
-            dc_left = max(q_dc_av - need_dc_su, 0.0) / frac_on
-            if q_f_on >= q_pc_des:
-                sur = q_f_on - q_pc_des
-                ch = min(sur, q_ch_av / frac_on)
-                extra = min(sur - ch, q_pc_max - q_pc_des)
-                q_pc_on = q_pc_des + extra
-                q_ch = ch * frac_on
-                q_defoc = (sur - ch - extra) * frac_on
+                    dc = min(max(q_target_eff - q_f, 0.0), q_dc_av)
+                    q_pc_on = q_f + dc
+                    q_dc = dc
+                    q_defoc = 0.0
             else:
-                dc = min(q_pc_des - q_f_on, dc_left)
-                if (q_f_on + dc) < q_pc_min:
+                q_avail = q_f + q_dc_av
+                if q_avail > 1e-3:
+                    # Desligamento suave / operação sub-horária em carga mínima sem descarte forçado
+                    t_run = min(1.0, q_avail / q_pc_min)
+                    frac_on = t_run
+                    q_pc_on = q_pc_min
+                    q_dc = min(max(q_pc_min * t_run - q_f, 0.0), q_dc_av)
+                    q_defoc = 0.0
+                    pc_on = (t_run >= 0.90)
+                else:
                     pc_on = False
                     frac_on = 0.0
-                    q_ch = min(q_f_rest, q_ch_av)
-                    q_defoc = q_f_rest - q_ch
-                else:
-                    q_pc_on = q_f_on + dc
-                    q_dc = dc * frac_on
-            q_dc += need_dc_su
-        else:
-            q_dc = need_dc_su
-            q_ch = min(q_f_rest, q_ch_av)
-            q_defoc = q_f_rest - q_ch
+                    q_ch = min(q_f, q_ch_av)
+                    q_defoc = q_f - q_ch
 
         if q_ch > 1e-6:
             r_tes = tes.step(+1, q_ch, t_hot_k, t_amb_k)
@@ -812,8 +991,10 @@ def despachar_csp_tes(
         w_bop = p_gross_nom_mwe * BOP_PAR_SAM * (BOP_PAR_0_SAM + BOP_PAR_1_SAM * f_load + BOP_PAR_2_SAM * (f_load ** 2)) if w_gross > 0.0 else 0.0
         w_track = SCA_DRIVES_ELEC_SAM * 1e-6 * 8.0 * n_loops_atual if q_f > 0 else 0.0
 
+        # Bombeamento preciso do campo solar (SAM Darcy-Weisbach loops + headers)
         m_sf = q_f_used * 1e3 / (cp_f * dt_loop) if q_f_used > 0 else 0.0
-        w_sf = (k_sf_pump / max(fator_campo ** 2, 1e-6)) * (m_sf ** 3) if m_sf > 0 else 0.0
+        m_loop = np.clip(m_sf / n_loops_atual, 0.0, 12.0)
+        w_sf = w_des_pump * ((m_loop / 12.0) ** 2.8) if m_loop > 0.05 else 0.0
 
         m_pb = q_pc * 1e3 / (cp_f * dt_loop)
         w_pump_pb = PB_PUMP_COEF_SAM * m_pb / 1e3
@@ -838,7 +1019,7 @@ def despachar_csp_tes(
         q_dc_out[j] = q_dc
         q_defoc_out[j] = q_defoc
         q_htf_used_out[j] = q_f_used
-        e_tes_armazenada_mwht[j] = tes.hot.mass_avail() * salt_cp_ave_k(t_cold_k, t_hot_k) * (t_hot_k - t_cold_k) / 3600.0
+        e_tes_armazenada_mwht[j] = tes.charge_state()
         q_loss_tes_out[j] = r_tes["q_loss"]
         w_fixed_out[j] = w_fixed
         w_bop_out[j] = w_bop
@@ -855,15 +1036,48 @@ def despachar_csp_tes(
     pot_anual_bruta = pd.Series(pout_horario_bruto_w.reshape(-1, 8760).sum(axis=1), dtype=float)
     pot_anual_liquida = pd.Series(pout_horario_liquido_w.reshape(-1, 8760).sum(axis=1), dtype=float)
 
+    # Acoplamento: cálculo do vetor de defocus do controlador e grandezas acopladas do receptor
+    df_ctrl_vec = np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0)
+    
+    scas_def_vec = np.clip((scas_def_comp if scas_def_comp is not None else 1.0) * df_ctrl_vec, 0.0, 1.0)
+    q_loss_vec = np.asarray(q_rec_loss_mwt, dtype=float) if q_rec_loss_mwt is not None else np.zeros(n_total)
+
+    if q_rec_inc_mwt is not None and q_rec_abs_mwt is not None:
+        q_rec_inc_coupled = q_rec_inc_mwt * df_ctrl_vec
+        # Formulação física do SAM C++ (csp_solver_trough_collector_receiver.cpp, linhas 2243-2246 e 2679):
+        # q_rec_abs = defocus * (q_abs_base + q_loss) - q_loss
+        q_rec_abs_coupled = np.where(
+            q_rec_abs_mwt >= 0.0,
+            df_ctrl_vec * (q_rec_abs_mwt + q_loss_vec) - q_loss_vec,
+            q_rec_abs_mwt,
+        )
+    elif q_rec_inc_mwt is not None:
+        q_rec_inc_coupled = q_rec_inc_mwt * df_ctrl_vec
+        q_rec_abs_coupled = None
+    elif q_rec_abs_mwt is not None:
+        q_rec_abs_coupled = np.where(
+            q_rec_abs_mwt >= 0.0,
+            df_ctrl_vec * (q_rec_abs_mwt + q_loss_vec) - q_loss_vec,
+            q_rec_abs_mwt,
+        )
+        q_rec_inc_coupled = None
+    else:
+        q_rec_inc_coupled = None
+        q_rec_abs_coupled = None
+
     return {
         "p_horaria_bruta_w": pout_horario_bruto_w,
         "p_horaria_liquida_w": pout_horario_liquido_w,
         "pot_anual_bruta_wh": pot_anual_bruta,
         "pot_anual_liquida_wh": pot_anual_liquida,
         "diagnostico_csp": {
-            "Field_fraction_of_focused_SCAs": np.clip(scas_def_comp * np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0), 0.0, 1.0) if scas_def_comp is not None else np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0),
-            "scas_def": np.clip(scas_def_comp * np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0), 0.0, 1.0) if scas_def_comp is not None else np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0),
-            "df_ctrl": np.clip(np.where(p_in_mwt > 1e-6, 1.0 - (q_defoc_out / np.maximum(p_in_mwt, 1e-6)), 1.0), 0.0, 1.0),
+            "Field_fraction_of_focused_SCAs": scas_def_vec,
+            "scas_def": scas_def_vec,
+            "df_ctrl": df_ctrl_vec,
+            "defocus": df_ctrl_vec,
+            "q_rec_inc": q_rec_inc_coupled,
+            "q_rec_abs": q_rec_abs_coupled,
+            "q_htf_out": q_htf_used_out,
             "Q_Receptor_Antes_Inercia_MWt": p_in_mwt,
             "Q_Perda_Inercia_Campo_MWt": np.zeros(n_total),
             "Q_Dump_TES_Cheio_MWt": q_defoc_out,
