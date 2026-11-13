@@ -36,8 +36,8 @@ WS_DIR = os.path.dirname(os.path.abspath(__file__))
 PASTA_CLIMA = os.path.join(WS_DIR, "historico_variaveis", "nsrdb")
 PREFIXO_LOC = "2008167_-5.11_-36.62"
 ARQUIVO_CONFIG_SAM = os.path.join(WS_DIR, "csp_sam_2009.json")
-ARQUIVO_SAIDA_EXCEL = os.path.join(WS_DIR, "comparativo_multianos_sam_vs_python3.xlsx")
-ARQUIVO_SAIDA_CSV = os.path.join(WS_DIR, "comparativo_multianos_sam_vs_python3.csv")
+ARQUIVO_SAIDA_EXCEL = os.path.join(WS_DIR, "comparativo_multianos_sam_vs_python4.xlsx")
+ARQUIVO_SAIDA_CSV = os.path.join(WS_DIR, "comparativo_multianos_sam_vs_python4.csv")
 
 # Definição das 10 configurações únicas (2000 a 2009)
 CONFIGURACOES_MULTI_ANUAIS = [
@@ -85,6 +85,16 @@ def executar_simulacao_pysam(
         m.value("specified_total_aperture", float(n_loops) * 5248.0)
         m.execute()
 
+        # Extração completa de todas as 125 saídas horárias do PySAM (8760 passos)
+        sam_export = m.Outputs.export()
+        hourly_dict = {
+            k: v for k, v in sam_export.items()
+            if isinstance(v, (list, tuple)) and len(v) == 8760
+        }
+        df_sam_hourly = pd.DataFrame(hourly_dict)
+        if "hora" not in df_sam_hourly.columns:
+            df_sam_hourly.insert(0, "hora", np.arange(1, 8761))
+
         return {
             "q_inc_sf": np.array(m.Outputs.q_inc_sf_tot)[:8760],
             "q_rec_inc": np.array(m.Outputs.q_dot_rec_inc)[:8760],
@@ -98,6 +108,7 @@ def executar_simulacao_pysam(
             "defocus": np.array(m.Outputs.defocus)[:8760],
             "tank_losses": np.array(m.Outputs.tank_losses)[:8760],
             "w_field_pump": np.array(m.Outputs.W_dot_field_pump)[:8760],
+            "df_hourly": df_sam_hourly,
         }
     except Exception as e:
         print(f"  [AVISO PySAM] Simulação abortada pelo solver do SAM: {e}")
@@ -130,7 +141,7 @@ def executar_simulacao_python(
         os.path.join(WS_DIR, "scratch"),
     ]
     res_campo = None
-    cache_nome_alvo = f"cache_campo_v6_{n_loops}loops_p{p_ref_gross:.1f}_tes{tes_hours:.0f}h_{clima_sig}.npz"
+    cache_nome_alvo = f"cache_campo_v7_{n_loops}loops_p{p_ref_gross:.1f}_tes{tes_hours:.0f}h_{clima_sig}.npz"
     for cd in cache_dirs:
         c_path = os.path.join(cd, cache_nome_alvo)
         if os.path.exists(c_path):
@@ -189,6 +200,56 @@ def executar_simulacao_python(
 
     q_inc_sf_final = py_q_inc.copy()
 
+    # Construção do DataFrame detalhado da simulação Python (compatível com os outputs do SAM)
+    t_cold_c = res_campo.get("t_sys_c_t_end", np.zeros(8760))[:8760]
+    if np.any(t_cold_c > 200.0):
+        t_cold_c = t_cold_c - 273.15
+    t_hot_c = res_campo.get("t_sys_h_t_end", np.zeros(8760))[:8760]
+    if np.any(t_hot_c > 200.0):
+        t_hot_c = t_hot_c - 273.15
+
+    scas_def = res_campo.get("scas_def", np.ones(8760))[:8760]
+    df_ctrl = diag.get("df_ctrl", np.ones(8760))[:8760]
+    defocus_tot = np.clip(scas_def * df_ctrl, 0.0, 1.0)
+
+    df_py_hourly = pd.DataFrame({
+        "hora": np.arange(1, 8761),
+        "beam": dni_arr[:8760],
+        "tdry": temp_arr[:8760],
+        "wspd": np.asarray(cenario_clima.get("vento_vel", np.zeros(8760)), dtype=float)[:8760],
+        "CosTh_ave": res_campo.get("cos_th", np.zeros(8760))[:8760],
+        "q_inc_sf_tot": q_inc_sf_final[:8760],
+        "qinc_costh": res_campo.get("q_inc_costh", np.zeros(8760))[:8760],
+        "q_dot_rec_inc": diag.get("q_rec_inc", py_q_rec_inc)[:8760],
+        "q_dot_rec_abs": diag.get("q_rec_abs", py_q_rec_abs)[:8760],
+        "q_dot_rec_thermal_loss": res_campo.get("q_rec_loss", np.zeros(8760))[:8760],
+        "q_dot_rec_refl": res_campo.get("q_rec_refl", np.zeros(8760))[:8760],
+        "q_dot_htf_sf_out": diag.get("q_htf_out", py_q_htf_out)[:8760],
+        "q_dot_piping_loss": res_campo.get("q_piping_loss", np.zeros(8760))[:8760],
+        "e_dot_field_int_energy": res_campo.get("e_int_energy", np.zeros(8760))[:8760],
+        "q_dot_freeze_prot": res_campo.get("q_fp", np.zeros(8760))[:8760],
+        "SCAs_def": scas_def,
+        "defocus": df_ctrl,
+        "defocus_final": defocus_tot,
+        "T_field_cold_in": t_cold_c,
+        "T_field_hot_out": t_hot_c,
+        "m_dot_loop": res_campo.get("m_dot_loop", np.zeros(8760))[:8760],
+        "rec_time_in_startup": res_campo.get("rec_time_in_startup", np.zeros(8760))[:8760],
+        "q_ch_tes": diag.get("Q_Carga_TES_MWt", np.zeros(8760))[:8760],
+        "q_dc_tes": diag.get("Q_Descarga_TES_MWt", np.zeros(8760))[:8760],
+        "e_ch_tes": diag.get("Energia_Armazenada_TES_MWht", np.zeros(8760))[:8760],
+        "tank_losses": diag.get("Perdas_Termicas_Tanques_MWt", np.zeros(8760))[:8760],
+        "q_pb": diag.get("Q_Entrada_Ciclo_Rankine_MWt", np.zeros(8760))[:8760],
+        "P_cycle": diag.get("P_Ciclo_Bruta_MWe", np.zeros(8760))[:8760],
+        "P_out_net": res_csp["p_horaria_liquida_w"][:8760] / 1e6,
+        "W_dot_field_pump": diag.get("Consumo_Bombas_Campo_MWe", np.zeros(8760))[:8760],
+        "W_dot_sca_track": diag.get("Consumo_Rastreamento_MWe", np.zeros(8760))[:8760],
+        "P_cooling_tower_tot": diag.get("Consumo_Torre_Resfriamento_MWe", np.zeros(8760))[:8760],
+        "P_plant_balance_tot": diag.get("Consumo_BOP_MWe", np.zeros(8760))[:8760],
+        "P_fixed": diag.get("Consumo_Fixo_MWe", np.zeros(8760))[:8760],
+        "P_parasitics_total": diag.get("Consumo_Parasita_Total_MWe", np.zeros(8760))[:8760],
+    })
+
     return {
         "q_inc_sf": q_inc_sf_final[:8760],
         "q_rec_inc": diag.get("q_rec_inc", py_q_rec_inc)[:8760],
@@ -200,6 +261,7 @@ def executar_simulacao_python(
         "p_cycle": diag["P_Ciclo_Bruta_MWe"][:8760],
         "p_net": res_csp["p_horaria_liquida_w"][:8760] / 1e6,
         "defocus": diag["df_ctrl"][:8760],
+        "df_hourly": df_py_hourly,
     }
 
 
@@ -419,6 +481,56 @@ def executar_auditoria_completa():
             print(f"  P_cycle:   SAM=- | Py={linha_geral['Py Geração Bruta (GWhe)']} GWhe")
             print(f"  P_net:     SAM=- | Py={linha_geral['Py Geração Líquida (GWhe)']} GWhe")
             print(f"  Defocus:   SAM=- | Py={py_df_hrs} h")
+
+        # 4.1 Exportar arquivo horário detalhado do ano (results_{ano}.xlsx) com abas SAM e Python
+        arquivo_ano_excel = os.path.join(WS_DIR, f"results_{ano}.xlsx")
+        try:
+            df_comp_horario = pd.DataFrame({
+                "hora": np.arange(1, 8761),
+                "beam (W/m2)": cenario["dni"][:8760],
+                "SAM_q_inc_sf (MWt)": res_sam["q_inc_sf"] if sam_ok else np.nan,
+                "Py_q_inc_sf (MWt)": res_py["q_inc_sf"],
+                "Diff_q_inc_sf (MWt)": (res_py["q_inc_sf"] - res_sam["q_inc_sf"]) if sam_ok else np.nan,
+                "SAM_q_rec_inc (MWt)": res_sam["q_rec_inc"] if sam_ok else np.nan,
+                "Py_q_rec_inc (MWt)": res_py["q_rec_inc"],
+                "Diff_q_rec_inc (MWt)": (res_py["q_rec_inc"] - res_sam["q_rec_inc"]) if sam_ok else np.nan,
+                "SAM_q_rec_abs (MWt)": res_sam["q_rec_abs"] if sam_ok else np.nan,
+                "Py_q_rec_abs (MWt)": res_py["q_rec_abs"],
+                "Diff_q_rec_abs (MWt)": (res_py["q_rec_abs"] - res_sam["q_rec_abs"]) if sam_ok else np.nan,
+                "SAM_q_htf_out (MWt)": res_sam["q_htf_out"] if sam_ok else np.nan,
+                "Py_q_htf_out (MWt)": res_py["q_htf_out"],
+                "Diff_q_htf_out (MWt)": (res_py["q_htf_out"] - res_sam["q_htf_out"]) if sam_ok else np.nan,
+                "SAM_defocus (-)": res_sam["defocus"] if sam_ok else np.nan,
+                "Py_defocus (-)": res_py["defocus"],
+                "Diff_defocus (-)": (res_py["defocus"] - res_sam["defocus"]) if sam_ok else np.nan,
+                "SAM_q_pb (MWt)": res_sam["q_pb"] if sam_ok else np.nan,
+                "Py_q_pb (MWt)": res_py["q_pb"],
+                "Diff_q_pb (MWt)": (res_py["q_pb"] - res_sam["q_pb"]) if sam_ok else np.nan,
+                "SAM_P_cycle (MWe)": res_sam["p_cycle"] if sam_ok else np.nan,
+                "Py_P_cycle (MWe)": res_py["p_cycle"],
+                "Diff_P_cycle (MWe)": (res_py["p_cycle"] - res_sam["p_cycle"]) if sam_ok else np.nan,
+                "SAM_P_net (MWe)": res_sam["p_net"] if sam_ok else np.nan,
+                "Py_P_net (MWe)": res_py["p_net"],
+                "Diff_P_net (MWe)": (res_py["p_net"] - res_sam["p_net"]) if sam_ok else np.nan,
+            })
+
+            def _salvar_planilha_ano(caminho):
+                with pd.ExcelWriter(caminho, engine="openpyxl") as writer:
+                    df_comp_horario.to_excel(writer, sheet_name="Comparativo", index=False)
+                    if sam_ok and "df_hourly" in res_sam and res_sam["df_hourly"] is not None:
+                        res_sam["df_hourly"].to_excel(writer, sheet_name="SAM", index=False)
+                    if "df_hourly" in res_py and res_py["df_hourly"] is not None:
+                        res_py["df_hourly"].to_excel(writer, sheet_name="Python", index=False)
+
+            try:
+                _salvar_planilha_ano(arquivo_ano_excel)
+                print(f"  [Arquivo Horário] Salvo com sucesso: '{arquivo_ano_excel}' (Abas: Comparativo, SAM, Python)")
+            except PermissionError:
+                alt_ano_path = arquivo_ano_excel.replace(".xlsx", "_novo.xlsx")
+                _salvar_planilha_ano(alt_ano_path)
+                print(f"  [Arquivo Horário] Salvo como alternativa (arquivo aberto): '{alt_ano_path}'")
+        except Exception as e_save_yr:
+            print(f"  [AVISO Salvar Horário] Falha ao exportar saídas horárias de {ano}: {e_save_yr}")
 
     # 5. DataFrames Consolidados
     df_geral = pd.DataFrame(registros_gerais)

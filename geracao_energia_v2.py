@@ -582,7 +582,7 @@ def simular_receptor_csp(
     n_pts = len(dni_arr)
 
     clima_sig = f"lat{lat_val:.2f}_lon{lon_val:.2f}_tz{tz_val}_dni{dni_sum}_t{temp_sum}_n{n_pts}"
-    cache_nome_sig = f"cache_campo_{n_loops_alvo}loops_p{p_ref_alvo:.1f}_{clima_sig}.npz"
+    cache_nome_sig = f"cache_campo_v7_{n_loops_alvo}loops_p{p_ref_alvo:.1f}_{clima_sig}.npz"
     cache_nome_legado = f"cache_campo_{n_loops_alvo}loops_{clima_sig}.npz"
     cache_nome_padrao = "cache_campo_91loops.npz"
 

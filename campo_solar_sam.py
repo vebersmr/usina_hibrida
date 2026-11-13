@@ -625,6 +625,8 @@ def dimensionar_campo_tubulacoes_sam(
         "solar_mult": solar_mult,
         "p_ref_mw": p_ref_mw,
         "eta_ref": eta_ref,
+        "cycle_cutoff_frac": 0.20,
+        "tes_hours": 0.0,
         "dt_hot": 5.0,  # DeltaT de projeto do trocador HTF <-> TES (SAM csp_solver_two_tank_tes.cpp m_dt_hot = 5.0 C)
         "rec_su_delay_s": 0.2 * 3600.0,
         "rec_qf_delay": 0.25,
@@ -1224,10 +1226,13 @@ def simular_campo_solar_sam_8760(
         # entre o ciclo de potência e a carga do armazenamento térmico (TES)
         t_in_des_k = cfg["t_in_des_k"]
         tes_hours = cfg.get("tes_hours", 0.0)
+        p_ref_gross = cfg.get("p_ref_mw", 111.0)
+        eta_ref = cfg.get("eta_ref", 0.356)
+        q_pb_des = p_ref_gross / max(eta_ref, 1e-4)
+        cycle_cutoff_frac = cfg.get("cycle_cutoff_frac", 0.20)
+        q_pc_min = cycle_cutoff_frac * q_pb_des
+
         if tes_hours > 0.0 and is_on_sun:
-            p_ref_gross = cfg.get("p_ref_mw", 111.0)
-            eta_ref = cfg.get("eta_ref", 0.356)
-            q_pb_des = p_ref_gross / max(eta_ref, 1e-4)
             dt_pb_des = max(cfg["t_out_des_k"] - t_in_des_k, 1.0)
             m_pc_des = (q_pb_des * 1e6) / (2450.0 * dt_pb_des)
             m_field_est = m_dot_ss * n_loops_f
@@ -1246,24 +1251,42 @@ def simular_campo_solar_sam_8760(
 
         if op_mode == 2 and is_on_sun:
             res_on = run_on_step(state_conv, 3600.0, t_cold_in_des, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base, q_acc_step)
-            state_conv = res_on["state_end"]
-            if res_on["t_sys_h_t_end"] < cfg["t_shutdown_k"]:
-                state_conv["op_mode"] = 0 if dni < 1.0 else 1
-            out_q_rec_loss[idx] = res_on["q_loss"]
-            out_q_rec_abs[idx] = res_on["q_abs"]
-            out_q_rec_refl[idx] = res_on["q_refl"]
-            out_q_rec_inc[idx] = out_q_rec_abs[idx] + out_q_rec_loss[idx] + out_q_rec_refl[idx]
-            out_e_int_energy[idx] = res_on["e_int"]
-            out_q_htf_out[idx] = res_on["q_htf"]
-            out_q_fp[idx] = res_on["q_fp"]
-            out_scas_def[idx] = res_on["df_total"]
-            out_defocus[idx] = res_on["df_ctrl"]
-            out_q_piping_loss[idx] = res_on["q_pipe_loss"]
+            # Condição SAM C++ (csp_solver_core.cpp linhas 2148 e 3875-3937):
+            # Se tes_hours == 0 e a potência térmica entregue cair abaixo da carga mínima da turbina (q_pc_min),
+            # o ciclo não pode operar e não há TES -> entra em CR_OFF (modo 101), chamando loop_optical_eta_off()
+            if tes_hours == 0.0 and res_on["q_htf"] < q_pc_min:
+                res_off = run_off_or_su_substeps(state_conv, 3600.0, False, t_db_k, t_sky_k, v_wind, p_pa, 0.0, q_sca_base, col_eff_base, m_dot_ss)
+                state_conv = res_off["state_end"]
+                state_conv["op_mode"] = 0
+                out_rec_time_in_su[idx] = 0.0
+                out_cos_th[idx] = 0.0
+                out_q_inc_costh[idx] = 0.0
+                out_q_inc_sf[idx] = 0.0
+                out_q_rec_loss[idx] = res_off["q_loss"]
+                out_q_rec_abs[idx] = res_off["q_abs"]
+                out_q_rec_refl[idx] = res_off["q_refl"]
+                out_q_rec_inc[idx] = 0.0
+                out_e_int_energy[idx] = res_off["e_int"]
+                out_q_htf_out[idx] = 0.0
+                out_q_fp[idx] = res_off["q_fp"]
+                out_scas_def[idx] = 1.0
+                out_defocus[idx] = 1.0
+                out_q_piping_loss[idx] = res_off["q_pipe_loss"]
+            else:
+                state_conv = res_on["state_end"]
+                if res_on["t_sys_h_t_end"] < cfg["t_shutdown_k"]:
+                    state_conv["op_mode"] = 0 if dni < 1.0 else 1
+                out_q_rec_loss[idx] = res_on["q_loss"]
+                out_q_rec_abs[idx] = res_on["q_abs"]
+                out_q_rec_refl[idx] = res_on["q_refl"]
+                out_q_rec_inc[idx] = out_q_rec_abs[idx] + out_q_rec_loss[idx] + out_q_rec_refl[idx]
+                out_e_int_energy[idx] = res_on["e_int"]
+                out_q_htf_out[idx] = res_on["q_htf"]
+                out_q_fp[idx] = res_on["q_fp"]
+                out_scas_def[idx] = res_on["df_total"]
+                out_defocus[idx] = res_on["df_ctrl"]
+                out_q_piping_loss[idx] = res_on["q_pipe_loss"]
         else:
-            # Em C_csp_trough_collector_receiver::estimates (linha 3114), sempre que weather.m_beam > 1.0,
-            # m_q_startup_avail = max(..., 1.0) > 0, o que faz o controlador entrar em CR_SU e chamar startup().
-            # Contudo, para usinas sem TES (tshours == 0), a partida do receptor só é acionada se a radiação
-            # for suficiente para viabilizar a carga mínima da turbina (DNI > 180 W/m2 com 46 loops).
             if is_on_sun:
                 res_su = run_off_or_su_substeps(state_conv, 3600.0, True, t_db_k, t_sky_k, v_wind, p_pa, dni, q_sca_base, col_eff_base, m_dot_ss)
                 if res_su["reached_on"] and res_su["time_used"] < 3600.0:
@@ -1310,9 +1333,16 @@ def simular_campo_solar_sam_8760(
                 state_conv = res_off["state_end"]
                 state_conv["op_mode"] = 0
                 out_rec_time_in_su[idx] = 0.0
-                out_cos_th[idx] = 0.0
-                out_q_inc_costh[idx] = 0.0
-                out_q_inc_sf[idx] = 0.0
+                # SAM C++ loop_optical_eta: se DNI > 1 e solzen < 90, mas ftrack == 0:
+                # cos_th = 1.0 e q_inc_sf = dni * ap_tot * 1e-6 (se não for stow de vento ou noite)
+                if solar_alt > 0.0 and dni > 1.0 and v_wind < 25.0:
+                    out_cos_th[idx] = 1.0
+                    out_q_inc_costh[idx] = q_inc_sf
+                    out_q_inc_sf[idx] = q_inc_sf
+                else:
+                    out_cos_th[idx] = 0.0
+                    out_q_inc_costh[idx] = 0.0
+                    out_q_inc_sf[idx] = 0.0
                 out_q_rec_loss[idx] = res_off["q_loss"]
                 out_q_rec_abs[idx] = res_off["q_abs"]
                 out_q_rec_refl[idx] = res_off["q_refl"]
