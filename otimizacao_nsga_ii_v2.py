@@ -476,7 +476,9 @@ def precalcular_perfis_unitarios(
 
     import glob
     ws_dir = os.path.dirname(os.path.abspath(__file__))
-    for f_c in glob.glob(os.path.join(ws_dir, f"cache_campo_*_{clima_sig}.npz")):
+    pasta_cache = os.path.join(ws_dir, "cache_campo")
+    os.makedirs(pasta_cache, exist_ok=True)
+    for f_c in glob.glob(os.path.join(pasta_cache, f"cache_campo_*_{clima_sig}.npz")):
         try:
             dados = np.load(f_c)
             n_l = int(dados.get("n_loops_sim", 0))

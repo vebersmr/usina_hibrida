@@ -858,11 +858,13 @@ def simular_campo_solar_sam_8760(
     col_opt_eff_0 = 0.988 * 0.952 * 0.93 * 0.97 * 1.0  # SAM: Tracking, geometry, clean refl, dirt, general = 0.848386416
 
     t_field_ini = 0.5 * (cfg["t_fp_k"] + cfg["t_in_des_k"])
+    e_pc_su_des = cfg.get("cycle_cutoff_frac", 0.20) * (cfg.get("p_ref_mw", 111.0) / max(cfg.get("eta_ref", 0.356), 1e-4))
     state_conv = {
         "t_sys_c_t_end_last": t_field_ini,
         "t_sys_h_t_end_last": t_field_ini,
         "t_htf_out_t_end_last": [t_field_ini] * n_sca,
         "op_mode": 0,
+        "pc_e_su_rem": e_pc_su_des,
     }
 
     out_q_inc_sf = np.zeros(n_steps)
@@ -886,6 +888,7 @@ def simular_campo_solar_sam_8760(
             "t_sys_h_t_end_last": s["t_sys_h_t_end_last"],
             "t_htf_out_t_end_last": list(s["t_htf_out_t_end_last"]),
             "op_mode": s["op_mode"],
+            "pc_e_su_rem": s.get("pc_e_su_rem", e_pc_su_des),
         }
 
     def run_off_or_su_substeps(state_in, dt_total, is_startup, t_db_k, t_sky_k, v_wind, p_pa, dni_val, q_sca_base, col_eff_base, m_dot_ss):
@@ -1251,29 +1254,78 @@ def simular_campo_solar_sam_8760(
 
         if op_mode == 2 and is_on_sun:
             res_on = run_on_step(state_conv, 3600.0, t_cold_in_des, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base, q_acc_step)
-            # Condição SAM C++ (csp_solver_core.cpp linhas 2148 e 3875-3937):
-            # Se tes_hours == 0 e a potência térmica entregue cair abaixo da carga mínima da turbina (q_pc_min),
-            # o ciclo não pode operar e não há TES -> entra em CR_OFF (modo 101), chamando loop_optical_eta_off()
+            # Lógica SAM C++ para usinas sem TES (csp_solver_core.cpp linhas 2148, 3521-3560 e 3875-3937):
+            # - Se pc_e_su_rem > 0 (turbina em PC_OFF/PC_SU, Modo 3 CR_ON__PC_SU): aceita qualquer q_htf > 0 até completar pc_e_su_rem.
+            # - Se pc_e_su_rem == 0 (turbina em PC_ON, Modo 6) e q_htf < q_pc_min: desliga para CR_OFF (Modo 101) e reseta pc_e_su_rem.
             if tes_hours == 0.0 and res_on["q_htf"] < q_pc_min:
-                res_off = run_off_or_su_substeps(state_conv, 3600.0, False, t_db_k, t_sky_k, v_wind, p_pa, 0.0, q_sca_base, col_eff_base, m_dot_ss)
-                state_conv = res_off["state_end"]
-                state_conv["op_mode"] = 0
-                out_rec_time_in_su[idx] = 0.0
-                out_cos_th[idx] = 0.0
-                out_q_inc_costh[idx] = 0.0
-                out_q_inc_sf[idx] = 0.0
-                out_q_rec_loss[idx] = res_off["q_loss"]
-                out_q_rec_abs[idx] = res_off["q_abs"]
-                out_q_rec_refl[idx] = res_off["q_refl"]
-                out_q_rec_inc[idx] = 0.0
-                out_e_int_energy[idx] = res_off["e_int"]
-                out_q_htf_out[idx] = 0.0
-                out_q_fp[idx] = res_off["q_fp"]
-                out_scas_def[idx] = 1.0
-                out_defocus[idx] = 1.0
-                out_q_piping_loss[idx] = res_off["q_pipe_loss"]
+                pc_e_rem_cur = state_conv.get("pc_e_su_rem", e_pc_su_des)
+                e_avail_on = res_on["q_htf"]  # MWht em 1.0 h
+                if e_avail_on <= 0.0 or pc_e_rem_cur <= 0.0:
+                    # Turbina já estava em PC_ON (ou sem calor útil) e caiu abaixo de q_pc_min -> CR_OFF integral
+                    res_off = run_off_or_su_substeps(state_conv, 3600.0, False, t_db_k, t_sky_k, v_wind, p_pa, 0.0, q_sca_base, col_eff_base, m_dot_ss)
+                    state_conv = res_off["state_end"]
+                    state_conv["op_mode"] = 0
+                    state_conv["pc_e_su_rem"] = e_pc_su_des
+                    out_rec_time_in_su[idx] = 0.0
+                    out_cos_th[idx] = 0.0
+                    out_q_inc_costh[idx] = 0.0
+                    out_q_inc_sf[idx] = 0.0
+                    out_q_rec_loss[idx] = res_off["q_loss"]
+                    out_q_rec_abs[idx] = res_off["q_abs"]
+                    out_q_rec_refl[idx] = res_off["q_refl"]
+                    out_q_rec_inc[idx] = 0.0
+                    out_e_int_energy[idx] = res_off["e_int"]
+                    out_q_htf_out[idx] = 0.0
+                    out_q_fp[idx] = res_off["q_fp"]
+                    out_scas_def[idx] = 1.0
+                    out_defocus[idx] = 1.0
+                    out_q_piping_loss[idx] = res_off["q_pipe_loss"]
+                elif e_avail_on < pc_e_rem_cur:
+                    # Permanece a hora inteira aquecendo a turbina no Modo 3 (CR_ON__PC_SU__TES_OFF__AUX_OFF)
+                    state_conv = res_on["state_end"]
+                    state_conv["pc_e_su_rem"] = pc_e_rem_cur - e_avail_on
+                    if res_on["t_sys_h_t_end"] < cfg["t_shutdown_k"]:
+                        state_conv["op_mode"] = 0 if dni < 1.0 else 1
+                    out_q_rec_loss[idx] = res_on["q_loss"]
+                    out_q_rec_abs[idx] = res_on["q_abs"]
+                    out_q_rec_refl[idx] = res_on["q_refl"]
+                    out_q_rec_inc[idx] = out_q_rec_abs[idx] + out_q_rec_loss[idx] + out_q_rec_refl[idx]
+                    out_e_int_energy[idx] = res_on["e_int"]
+                    out_q_htf_out[idx] = res_on["q_htf"]
+                    out_q_fp[idx] = res_on["q_fp"]
+                    out_scas_def[idx] = res_on["df_total"]
+                    out_defocus[idx] = res_on["df_ctrl"]
+                    out_q_piping_loss[idx] = res_on["q_pipe_loss"]
+                else:
+                    # Conclui PC_SU na fração f_su da hora e, como q_htf < q_pc_min, desliga para CR_OFF na fração (1 - f_su)
+                    f_su = pc_e_rem_cur / e_avail_on
+                    f_off = 1.0 - f_su
+                    dt_pc_su = max(1.0, 3600.0 * f_su)
+                    dt_off = max(1.0, 3600.0 - dt_pc_su)
+                    res_on_sub = run_on_step(state_conv, dt_pc_su, t_cold_in_des, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base, q_acc_step)
+                    res_off_sub = run_off_or_su_substeps(res_on_sub["state_end"], dt_off, False, t_db_k, t_sky_k, v_wind, p_pa, 0.0, q_sca_base, col_eff_base, m_dot_ss)
+                    state_conv = res_off_sub["state_end"]
+                    state_conv["op_mode"] = 0
+                    state_conv["pc_e_su_rem"] = e_pc_su_des
+                    out_rec_time_in_su[idx] = 0.0
+                    out_cos_th[idx] = cos_th * f_su
+                    out_q_inc_sf[idx] = q_inc_sf * f_su
+                    out_q_inc_costh[idx] = out_q_inc_sf[idx] * cos_th
+                    out_q_rec_loss[idx] = res_on_sub["q_loss"] * f_su + res_off_sub["q_loss"] * f_off
+                    out_q_rec_abs[idx] = res_on_sub["q_abs"] * f_su + res_off_sub["q_abs"] * f_off
+                    out_q_rec_refl[idx] = res_on_sub["q_refl"] * f_su + res_off_sub["q_refl"] * f_off
+                    out_q_rec_inc[idx] = (res_on_sub["q_abs"] + res_on_sub["q_loss"] + res_on_sub["q_refl"]) * f_su
+                    out_e_int_energy[idx] = res_on_sub["e_int"] * f_su + res_off_sub["e_int"] * f_off
+                    out_q_htf_out[idx] = pc_e_rem_cur
+                    out_q_fp[idx] = res_on_sub["q_fp"] * f_su + res_off_sub["q_fp"] * f_off
+                    out_scas_def[idx] = res_on_sub["df_total"] * f_su + 1.0 * f_off
+                    out_defocus[idx] = res_on_sub["df_ctrl"] * f_su + 1.0 * f_off
+                    out_q_piping_loss[idx] = res_on_sub["q_pipe_loss"] * f_su + res_off_sub["q_pipe_loss"] * f_off
             else:
+                pc_e_rem_cur = state_conv.get("pc_e_su_rem", e_pc_su_des)
                 state_conv = res_on["state_end"]
+                if tes_hours == 0.0:
+                    state_conv["pc_e_su_rem"] = max(0.0, pc_e_rem_cur - res_on["q_htf"])
                 if res_on["t_sys_h_t_end"] < cfg["t_shutdown_k"]:
                     state_conv["op_mode"] = 0 if dni < 1.0 else 1
                 out_q_rec_loss[idx] = res_on["q_loss"]
@@ -1293,11 +1345,21 @@ def simular_campo_solar_sam_8760(
                     dt_su = res_su["time_used"]
                     dt_on = 3600.0 - dt_su
                     res_on = run_on_step(res_su["state_end"], dt_on, t_cold_in_des, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base, q_acc_step)
+                    pc_e_rem_cur = state_conv.get("pc_e_su_rem", e_pc_su_des)
                     state_conv = res_on["state_end"]
                     if res_on["t_sys_h_t_end"] < cfg["t_shutdown_k"]:
                         state_conv["op_mode"] = 0 if dni < 1.0 else 1
                     else:
                         state_conv["op_mode"] = 2
+                    if tes_hours == 0.0:
+                        e_avail_sub = res_on["q_htf"] * (dt_on / 3600.0)
+                        if res_on["q_htf"] >= q_pc_min:
+                            state_conv["pc_e_su_rem"] = max(0.0, pc_e_rem_cur - e_avail_sub)
+                        elif e_avail_sub < pc_e_rem_cur:
+                            state_conv["pc_e_su_rem"] = pc_e_rem_cur - e_avail_sub
+                        else:
+                            state_conv["pc_e_su_rem"] = e_pc_su_des
+                            state_conv["op_mode"] = 0
 
                     out_rec_time_in_su[idx] = dt_su / 60.0
                     out_q_rec_loss[idx] = (res_su["q_loss"] * dt_su + res_on["q_loss"] * dt_on) / 3600.0
@@ -1332,6 +1394,8 @@ def simular_campo_solar_sam_8760(
                 res_off = run_off_or_su_substeps(state_conv, 3600.0, False, t_db_k, t_sky_k, v_wind, p_pa, 0.0, q_sca_base, col_eff_base, m_dot_ss)
                 state_conv = res_off["state_end"]
                 state_conv["op_mode"] = 0
+                if tes_hours == 0.0:
+                    state_conv["pc_e_su_rem"] = e_pc_su_des
                 out_rec_time_in_su[idx] = 0.0
                 # SAM C++ loop_optical_eta: se DNI > 1 e solzen < 90, mas ftrack == 0:
                 # cos_th = 1.0 e q_inc_sf = dni * ap_tot * 1e-6 (se não for stow de vento ou noite)

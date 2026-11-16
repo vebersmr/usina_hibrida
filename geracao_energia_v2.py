@@ -582,16 +582,17 @@ def simular_receptor_csp(
     n_pts = len(dni_arr)
 
     clima_sig = f"lat{lat_val:.2f}_lon{lon_val:.2f}_tz{tz_val}_dni{dni_sum}_t{temp_sum}_n{n_pts}"
-    cache_nome_sig = f"cache_campo_v7_{n_loops_alvo}loops_p{p_ref_alvo:.1f}_{clima_sig}.npz"
+    cache_nome_sig = f"cache_campo_v8_{n_loops_alvo}loops_p{p_ref_alvo:.1f}_{clima_sig}.npz"
     cache_nome_legado = f"cache_campo_{n_loops_alvo}loops_{clima_sig}.npz"
     cache_nome_padrao = "cache_campo_91loops.npz"
+
+    pasta_cache = os.path.join(WS_DIR, "cache_campo")
+    os.makedirs(pasta_cache, exist_ok=True)
 
     res_campo = None
     c_nome_encontrado = None
     cache_dirs = [
-        WS_DIR,
-        os.path.join(WS_DIR, "scratch"),
-        r"C:\Users\victo\.gemini\antigravity\brain\c345f508-e215-480e-aeec-155215a9d525\scratch",
+        pasta_cache,
     ]
 
     for c_dir in cache_dirs:
@@ -624,10 +625,10 @@ def simular_receptor_csp(
         _dt = _time.time() - _t0
         print(f"[CSP Físico] Simulação concluída com sucesso em {_dt:.2f} s!")
 
-        salvar_path = os.path.join(WS_DIR, cache_nome_sig)
+        salvar_path = os.path.join(pasta_cache, cache_nome_sig)
         try:
             np.savez_compressed(salvar_path, **res_campo)
-            print(f"[CSP Físico] Cache salvo com sucesso: '{cache_nome_sig}'")
+            print(f"[CSP Físico] Cache salvo com sucesso em 'cache_campo/{cache_nome_sig}'")
         except Exception as e:
             print(f"[CSP Físico] Aviso: Não foi possível salvar o cache: {e}")
 
@@ -640,7 +641,7 @@ def simular_receptor_csp(
             pass
     if n_loops_cache is None and c_nome_encontrado:
         import re
-        m_l = re.search(r"cache_campo_(\d+)loops", c_nome_encontrado)
+        m_l = re.search(r"cache_campo_(?:v\d+_)?(\d+)loops", c_nome_encontrado)
         if m_l:
             n_loops_cache = int(m_l.group(1))
     if n_loops_cache is None:
@@ -777,7 +778,7 @@ def despachar_csp_tes(
             q_fp_field_mwt = p_in.diagnostico["q_fp"] * fator_campo
         else:
             try:
-                c = np.load(os.path.join(WS_DIR, "cache_campo_91loops.npz"))
+                c = np.load(os.path.join(WS_DIR, "cache_campo", "cache_campo_91loops.npz"))
                 q_fp_field_mwt = c["q_fp"] * fator_campo
             except Exception:
                 q_fp_field_mwt = np.zeros(n_total)
@@ -787,7 +788,7 @@ def despachar_csp_tes(
             scas_def_comp = p_in.diagnostico["scas_def"]
         else:
             try:
-                c = np.load(os.path.join(WS_DIR, "cache_campo_91loops.npz"))
+                c = np.load(os.path.join(WS_DIR, "cache_campo", "cache_campo_91loops.npz"))
                 if "scas_def" in c:
                     scas_def_comp = c["scas_def"]
             except Exception:
@@ -868,7 +869,9 @@ def despachar_csp_tes(
             if (q_f + q_dc_av) > 1e-6:
                 e_rem = max(e_su_req - e_su_acc, 0.0)
                 t_rem = max(su_time - t_su_acc, 0.0)
-                q_su = min(q_su_max, q_f + q_dc_av)
+                # Quando t_rem == 0 (tempo mínimo de aquecimento já cumprido), o limite de taxa é q_pc_max (SAM get_max_q_pc_startup)
+                q_su_max_eff = q_su_max if (t_rem > 1e-6 or tes_capacity > 1e-6) else q_pc_max
+                q_su = min(q_su_max_eff, q_f + q_dc_av)
                 t_need = max(t_rem, e_rem / max(q_su, 1e-9))
 
                 if t_need < 1.0:
@@ -877,7 +880,7 @@ def despachar_csp_tes(
                     q_pc_su = e_rem
 
                     # Balanço térmico na fração de startup:
-                    q_f_sur_su = max(q_f - q_su_max, 0.0)
+                    q_f_sur_su = max(q_f - q_su_max_eff, 0.0)
                     ch_su = min(q_f_sur_su, q_ch_av)
                     q_defoc_su = (q_f_sur_su - ch_su) * t_su
                     q_ch_su = ch_su * t_su
@@ -887,12 +890,11 @@ def despachar_csp_tes(
                     dc_left = max(q_dc_av - need_dc_su / max(t_on, 1e-6), 0.0)
                     q_avail_on = q_f + dc_left
 
-                    pc_on = True
-                    e_su_acc = 0.0
-                    t_su_acc = 0.0
-                    frac_on = t_on
-
                     if q_f >= q_pc_des:
+                        pc_on = True
+                        e_su_acc = 0.0
+                        t_su_acc = 0.0
+                        frac_on = t_on
                         sur = q_f - q_pc_des
                         ch = min(sur, q_ch_av)
                         extra = min(sur - ch, q_pc_max - q_pc_des)
@@ -901,6 +903,10 @@ def despachar_csp_tes(
                         q_defoc_on = (sur - ch - extra) * t_on
                         q_dc_on = 0.0
                     elif q_avail_on >= q_pc_min:
+                        pc_on = True
+                        e_su_acc = 0.0
+                        t_su_acc = 0.0
+                        frac_on = t_on
                         t_tes_hot_c = tes.hot.t_prev - 273.15
                         t_hx_htf_c = max(t_tes_hot_c - DT_HX_SAM, 293.0)
                         t_mix_in = (q_f * 391.0 + dc_left * t_hx_htf_c) / max(q_f + dc_left, 1e-6)
@@ -912,7 +918,22 @@ def despachar_csp_tes(
                         q_dc_on = dc * t_on
                         q_ch_on = 0.0
                         q_defoc_on = 0.0
+                    elif tes_capacity <= 1e-6:
+                        # Terminou PC_SU no meio da hora em usina sem TES, mas q_avail_on < q_pc_min:
+                        # No SAM (ex: horas 5242 e 5246), a turbina desliga e reseta o acumulador de partida
+                        pc_on = False
+                        e_su_acc = 0.0
+                        t_su_acc = 0.0
+                        frac_on = 0.0
+                        q_pc_on = 0.0
+                        q_dc_on = 0.0
+                        q_ch_on = 0.0
+                        q_defoc_on = 0.0
                     else:
+                        pc_on = True
+                        e_su_acc = 0.0
+                        t_su_acc = 0.0
+                        frac_on = t_on
                         q_pc_on = q_avail_on
                         q_dc_on = max(q_avail_on - q_f, 0.0) * t_on
                         q_ch_on = 0.0
@@ -930,7 +951,7 @@ def despachar_csp_tes(
                     need_dc_su = max(q_pc_su - q_f, 0.0)
                     q_dc = need_dc_su
 
-                    q_f_sur = max(q_f - q_su_max, 0.0)
+                    q_f_sur = max(q_f - q_su_max_eff, 0.0)
                     q_ch = min(q_f_sur, q_ch_av)
                     q_defoc = q_f_sur - q_ch
             else:
