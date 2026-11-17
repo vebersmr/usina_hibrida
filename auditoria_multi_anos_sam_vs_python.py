@@ -36,22 +36,22 @@ WS_DIR = os.path.dirname(os.path.abspath(__file__))
 PASTA_CLIMA = os.path.join(WS_DIR, "historico_variaveis", "nsrdb")
 PREFIXO_LOC = "2008167_-5.11_-36.62"
 ARQUIVO_CONFIG_SAM = os.path.join(WS_DIR, "csp_sam_2009.json")
-ARQUIVO_SAIDA_EXCEL = os.path.join(WS_DIR, "comparativo_multianos_sam_vs_python2.xlsx")
-ARQUIVO_SAIDA_CSV = os.path.join(WS_DIR, "comparativo_multianos_sam_vs_python2.csv")
+ARQUIVO_SAIDA_EXCEL = os.path.join(WS_DIR, "comparativo_multianos_sam_vs_python3.xlsx")
+ARQUIVO_SAIDA_CSV = os.path.join(WS_DIR, "comparativo_multianos_sam_vs_python3.csv")
 
 # Definição das 10 configurações únicas (2000 a 2009)
 CONFIGURACOES_MULTI_ANUAIS = [
-    # {"ano": 2000, "p_csp_mva": 50.0,  "tes_h": 0.0, "sm": 1.0, "n_loops": 46},
-    # {"ano": 2001, "p_csp_mva": 60.0,  "tes_h": 1.0, "sm": 1.2, "n_loops": 66},
-    # {"ano": 2002, "p_csp_mva": 70.0,  "tes_h": 2.0, "sm": 1.4, "n_loops": 89},
-    # {"ano": 2003, "p_csp_mva": 80.0,  "tes_h": 3.0, "sm": 1.6, "n_loops": 116},
-    # {"ano": 2004, "p_csp_mva": 90.0,  "tes_h": 4.0, "sm": 1.8, "n_loops": 147},
-    # {"ano": 2005, "p_csp_mva": 100.0, "tes_h": 5.0, "sm": 2.0, "n_loops": 181},
-    # {"ano": 2006, "p_csp_mva": 50.0,  "tes_h": 6.0, "sm": 2.1, "n_loops": 96},
-    # {"ano": 2007, "p_csp_mva": 70.0,  "tes_h": 7.0, "sm": 2.3, "n_loops": 147},
-    # {"ano": 2008, "p_csp_mva": 80.0,  "tes_h": 8.0, "sm": 2.4, "n_loops": 175},
-    # {"ano": 2009, "p_csp_mva": 100.0, "tes_h": 9.0, "sm": 2.5, "n_loops": 228},
-    {"ano": 2010, "p_csp_mva": 50.0,  "tes_h": 0.0, "sm": 1.0, "n_loops": 46},
+    {"ano": 2000, "p_csp_mva": 50.0,  "tes_h": 0.0, "sm": 1.0, "n_loops": 46},
+    {"ano": 2001, "p_csp_mva": 60.0,  "tes_h": 1.0, "sm": 1.2, "n_loops": 66},
+    {"ano": 2002, "p_csp_mva": 70.0,  "tes_h": 2.0, "sm": 1.4, "n_loops": 89},
+    {"ano": 2003, "p_csp_mva": 80.0,  "tes_h": 3.0, "sm": 1.6, "n_loops": 116},
+    {"ano": 2004, "p_csp_mva": 90.0,  "tes_h": 4.0, "sm": 1.8, "n_loops": 147},
+    {"ano": 2005, "p_csp_mva": 100.0, "tes_h": 5.0, "sm": 2.0, "n_loops": 181},
+    {"ano": 2006, "p_csp_mva": 50.0,  "tes_h": 6.0, "sm": 2.1, "n_loops": 96},
+    {"ano": 2007, "p_csp_mva": 70.0,  "tes_h": 7.0, "sm": 2.3, "n_loops": 147},
+    {"ano": 2008, "p_csp_mva": 80.0,  "tes_h": 8.0, "sm": 2.4, "n_loops": 175},
+    {"ano": 2009, "p_csp_mva": 100.0, "tes_h": 9.0, "sm": 2.5, "n_loops": 228},
+    {"ano": 2010, "p_csp_mva": 100.0, "tes_h": 5.0, "sm": 2.5, "n_loops": 228},
     {"ano": 2011, "p_csp_mva": 60.0,  "tes_h": 1.0, "sm": 1.2, "n_loops": 66},
     {"ano": 2012, "p_csp_mva": 70.0,  "tes_h": 2.0, "sm": 1.4, "n_loops": 89},
     {"ano": 2013, "p_csp_mva": 80.0,  "tes_h": 3.0, "sm": 1.6, "n_loops": 116},
@@ -152,7 +152,7 @@ def executar_simulacao_python(
         pasta_cache,
     ]
     res_campo = None
-    cache_nome_alvo = f"cache_campo_v8_{n_loops}loops_p{p_ref_gross:.1f}_tes{tes_hours:.0f}h_{clima_sig}.npz"
+    cache_nome_alvo = f"cache_campo_v9_{n_loops}loops_p{p_ref_gross:.1f}_tes{tes_hours:.0f}h_{clima_sig}.npz"
     for cd in cache_dirs:
         c_path = os.path.join(cd, cache_nome_alvo)
         if os.path.exists(c_path):

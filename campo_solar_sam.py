@@ -1252,7 +1252,7 @@ def simular_campo_solar_sam_8760(
 
         q_acc_step = q_accept_arr[idx] if q_accept_arr is not None else None
 
-        if op_mode == 2 and is_on_sun:
+        if op_mode == 2 and (is_on_sun or tes_hours > 0.0):
             res_on = run_on_step(state_conv, 3600.0, t_cold_in_des, t_db_k, t_sky_k, v_wind, p_pa, q_sca_base, col_eff_base, q_acc_step)
             # Lógica SAM C++ para usinas sem TES (csp_solver_core.cpp linhas 2148, 3521-3560 e 3875-3937):
             # - Se pc_e_su_rem > 0 (turbina em PC_OFF/PC_SU, Modo 3 CR_ON__PC_SU): aceita qualquer q_htf > 0 até completar pc_e_su_rem.
